@@ -1,0 +1,25 @@
+doc-valid-idents = ["ETag", "ETags", "RustFS", "ModernBERT", "PyTorch", ".."]
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-dbg-in-tests = true
+allow-print-in-tests = true
+absolute-paths-max-segments = 3
+
+disallowed-methods = [
+  { path = "std::thread::sleep", reason = "blocks the runtime; use tokio::time::sleep" },
+  { path = "std::fs::read", reason = "blocks the runtime; go through the store" },
+  { path = "std::fs::read_to_string", reason = "blocks the runtime; go through the store" },
+  { path = "std::fs::write", reason = "blocks the runtime; go through the store" },
+  { path = "std::env::var", reason = "a library takes configuration from its host" },
+  { path = "futures::future::join_all", reason = "unbounded concurrency; use buffer_unordered", allow-invalid = true },
+  { path = "std::panic::catch_unwind", reason = "a panic is a bug and is not handled; the only exceptions isolate a third-party parser" },
+  { path = "std::sync::PoisonError::into_inner", reason = "state behind a poisoned lock is not trusted" },
+  { path = "std::sync::PoisonError::get_ref", reason = "state behind a poisoned lock is not trusted" },
+  { path = "std::sync::PoisonError::get_mut", reason = "state behind a poisoned lock is not trusted" },
+  { path = "tokio::task::block_in_place", reason = "ties the library to one runtime flavour", allow-invalid = true },
+]
+disallowed-types = [
+  { path = "tokio::sync::Mutex", reason = "use std::sync::Mutex unless a lock must be held across .await", allow-invalid = true },
+]

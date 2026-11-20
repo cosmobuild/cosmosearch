@@ -1,0 +1,9 @@
+[profile.default]
+slow-timeout = { period = "5s", terminate-after = 2 }
+
+[profile.ci]
+fail-fast = false
+
+[[profile.default.overrides]]
+filter = "package(cosmosearch-embed-local) | package(cosmosearch-rerank-local)"
+slow-timeout = { period = "15s", terminate-after = 2 }

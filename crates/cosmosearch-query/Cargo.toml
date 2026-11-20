@@ -1,0 +1,38 @@
+[package]
+name = "cosmosearch-query"
+description = "Search, read and refresh for cosmosearch."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+test-util = ["cosmosearch-core/test-util", "cosmosearch-store/test-util"]
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+cosmosearch-chunk.workspace = true
+cosmosearch-core.workspace = true
+cosmosearch-format.workspace = true
+cosmosearch-store.workspace = true
+futures-util.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+cosmosearch-extract-html = { path = "../cosmosearch-extract-html" }
+cosmosearch-indexer = { path = "../cosmosearch-indexer", features = ["test-util"] }
+cosmosearch-lexical = { path = "../cosmosearch-lexical" }
+proptest.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+required-features = ["test-util"]

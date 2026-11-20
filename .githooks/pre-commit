@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+    echo "pre-commit: gitleaks is not installed; refusing to commit without a secret scan." >&2
+    exit 1
+fi
+
+if ! gitleaks git --pre-commit --staged --redact --no-banner --ignore-gitleaks-allow --verbose; then
+    echo "pre-commit: gitleaks found a possible secret in the staged changes (see above)." >&2
+    echo "pre-commit: remove it from the change; never bypass this hook." >&2
+    exit 1
+fi
+
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings

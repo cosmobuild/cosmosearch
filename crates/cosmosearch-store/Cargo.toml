@@ -1,0 +1,43 @@
+[package]
+name = "cosmosearch-store"
+description = "Storage for cosmosearch: backends, index lifecycle and atomic commits."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+test-util = []
+s3 = ["dep:object_store", "object_store/aws"]
+fs = ["dep:object_store", "object_store/fs"]
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+cosmosearch-core.workspace = true
+futures-util.workspace = true
+object_store = { workspace = true, optional = true }
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync"] }
+
+[package.metadata.docs.rs]
+features = ["s3", "fs"]
+
+[lints]
+workspace = true
+
+[[example]]
+name = "manifest"
+required-features = ["s3", "fs"]
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+required-features = ["test-util"]

@@ -1,0 +1,38 @@
+[package]
+name = "cosmosearch-indexer"
+description = "Indexing for cosmosearch: file changes, indexing jobs and promotion."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+test-util = ["cosmosearch-store/test-util"]
+
+[dependencies]
+bytes.workspace = true
+cosmosearch-chunk.workspace = true
+cosmosearch-core.workspace = true
+cosmosearch-format.workspace = true
+cosmosearch-store.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+async-trait.workspace = true
+cosmosearch-lexical = { path = "../cosmosearch-lexical" }
+cosmosearch-query = { path = "../cosmosearch-query" }
+cosmosearch-store = { path = "../cosmosearch-store", features = ["s3"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+required-features = ["test-util"]

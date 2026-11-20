@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+msg_file="$1"
+
+trailers=$(git stripspace --strip-comments <"$msg_file" | git interpret-trailers --parse)
+
+if [ -n "$trailers" ]; then
+    echo "commit-msg: trailers are not allowed in commit messages. Found:" >&2
+    printf '%s\n' "$trailers" | sed 's/^/  /' >&2
+    echo "commit-msg: remove them and commit again." >&2
+    exit 1
+fi

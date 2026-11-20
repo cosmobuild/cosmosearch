@@ -1,0 +1,18 @@
+[package]
+name = "cosmosearch-extract-csv"
+description = "CSV extractor for cosmosearch."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cosmosearch-core.workspace = true
+csv.workspace = true
+
+[dev-dependencies]
+cosmosearch-core = { path = "../cosmosearch-core", features = ["test-util"] }
+
+[lints]
+workspace = true

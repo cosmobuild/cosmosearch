@@ -1,0 +1,23 @@
+[package]
+name = "cosmosearch-extract-docx"
+description = "Word (.docx) extractor for cosmosearch."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cosmosearch-core.workspace = true
+flate2.workspace = true
+quick-xml.workspace = true
+zip.workspace = true
+
+[package.metadata.cargo-machete]
+ignored = ["flate2"]
+
+[dev-dependencies]
+cosmosearch-core = { path = "../cosmosearch-core", features = ["test-util"] }
+
+[lints]
+workspace = true

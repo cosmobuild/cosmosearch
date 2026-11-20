@@ -1,0 +1,801 @@
+use std::collections::BTreeMap;
+use std::fmt;
+use std::sync::Arc;
+
+use arrow_array::{Array, ArrayRef, StringArray, UInt32Array, UInt64Array};
+use arrow_schema::{DataType, Field, Schema};
+use bytes::Bytes;
+use cosmosearch_core::{Attributes, ETag, ExtractFailure, ManifestVersion};
+use serde::{Deserialize, Serialize};
+
+use crate::error::{EncodingError, malformed};
+use crate::stored::{self, optional, required};
+use crate::{Error, Result};
+
+const FORMAT: u32 = 2;
+const NEXT_ORDINAL: &str = "cosmosearch.next_ordinal";
+
+const ORDINAL: &str = "ordinal";
+const KEY: &str = "key";
+const SIZE: &str = "size";
+const ETAG: &str = "etag";
+const CONTENT_VERSION: &str = "content_version";
+const STATUS: &str = "status";
+const REASON: &str = "reason";
+const DISPLAY_NAME: &str = "display_name";
+const ATTRIBUTES: &str = "attributes";
+const UNREAD_PARTS: &str = "unread_parts";
+
+/// How far a file has got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FileStatus {
+    /// The change is recorded and waits for a job.
+    Pending,
+    /// The file's current content is in the index.
+    Ready,
+    /// The file's own problem stopped it, such as a limit or a parser failure.
+    Failed,
+    /// No extractor can read the file, or it has no text. Not a failure.
+    Unsupported,
+}
+
+impl FileStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            FileStatus::Pending => "pending",
+            FileStatus::Ready => "ready",
+            FileStatus::Failed => "failed",
+            FileStatus::Unsupported => "unsupported",
+        }
+    }
+
+    fn parse(text: &str) -> Result<Self> {
+        match text {
+            "pending" => Ok(FileStatus::Pending),
+            "ready" => Ok(FileStatus::Ready),
+            "failed" => Ok(FileStatus::Failed),
+            "unsupported" => Ok(FileStatus::Unsupported),
+            _ => Err(malformed("a file has an unknown status")),
+        }
+    }
+}
+
+/// Why a file is not ready.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum FileReason {
+    /// Extraction ended this way.
+    Extraction(ExtractFailure),
+    /// The recorded version is gone from the data location, so the file waits for a newer change.
+    SourceMoved,
+}
+
+impl FileReason {
+    fn status(self) -> FileStatus {
+        match self {
+            FileReason::Extraction(failure) if failure.is_unsupported() => FileStatus::Unsupported,
+            FileReason::Extraction(_) => FileStatus::Failed,
+            FileReason::SourceMoved => FileStatus::Pending,
+        }
+    }
+}
+
+impl fmt::Display for FileReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FileReason::Extraction(failure) => failure.fmt(f),
+            FileReason::SourceMoved => f.write_str("the recorded version of the file is gone"),
+        }
+    }
+}
+
+/// One file known to an index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileEntry {
+    ordinal: u64,
+    key: String,
+    size: u64,
+    etag: ETag,
+    content_version: ManifestVersion,
+    status: FileStatus,
+    reason: Option<FileReason>,
+    display_name: Option<String>,
+    attributes: Attributes,
+    unread_parts: u32,
+}
+
+impl FileEntry {
+    /// A file waiting for a job, whose content last changed at `content_version`.
+    pub fn pending(
+        key: impl Into<String>,
+        size: u64,
+        etag: ETag,
+        content_version: ManifestVersion,
+    ) -> Self {
+        FileEntry {
+            ordinal: 0,
+            key: key.into(),
+            size,
+            etag,
+            content_version,
+            status: FileStatus::Pending,
+            reason: None,
+            display_name: None,
+            attributes: Attributes::new(),
+            unread_parts: 0,
+        }
+    }
+
+    /// Sets the name a host shows for this file.
+    #[must_use]
+    pub fn with_display_name(mut self, name: Option<String>) -> Self {
+        self.display_name = name;
+        self
+    }
+
+    /// Sets the file's attributes.
+    #[must_use]
+    pub fn with_attributes(mut self, attributes: Attributes) -> Self {
+        self.attributes = attributes;
+        self
+    }
+
+    /// The file's number within its table, assigned when it is added and kept for its life.
+    pub fn ordinal(&self) -> u64 {
+        self.ordinal
+    }
+
+    /// The object key.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// The size in bytes.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// The ETag of the version recorded.
+    pub fn etag(&self) -> &ETag {
+        &self.etag
+    }
+
+    /// The manifest version of the latest change to the content.
+    pub fn content_version(&self) -> ManifestVersion {
+        self.content_version
+    }
+
+    /// How far the file has got.
+    pub fn status(&self) -> FileStatus {
+        self.status
+    }
+
+    /// Why the file is not ready, when something is known.
+    pub fn reason(&self) -> Option<FileReason> {
+        self.reason
+    }
+
+    /// The name a host shows for this file.
+    pub fn display_name(&self) -> Option<&str> {
+        self.display_name.as_deref()
+    }
+
+    /// The file's attributes.
+    pub fn attributes(&self) -> &Attributes {
+        &self.attributes
+    }
+
+    /// How many parts of the file, such as PDF pages that hold only an image, its extraction
+    /// could not read; zero unless the file is ready.
+    pub fn unread_parts(&self) -> u32 {
+        self.unread_parts
+    }
+}
+
+/// The files of one shard, by key.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileTable {
+    files: BTreeMap<String, FileEntry>,
+    keys_by_ordinal: BTreeMap<u64, String>,
+    next_ordinal: u64,
+}
+
+impl FileTable {
+    /// An empty table.
+    pub fn new() -> Self {
+        FileTable::default()
+    }
+
+    /// The file with this key.
+    pub fn get(&self, key: &str) -> Option<&FileEntry> {
+        self.files.get(key)
+    }
+
+    /// The file with this ordinal.
+    pub fn by_ordinal(&self, ordinal: u64) -> Option<&FileEntry> {
+        self.files.get(self.keys_by_ordinal.get(&ordinal)?)
+    }
+
+    /// Adds a file, or replaces the one with the same key and keeps its ordinal.
+    pub fn insert(&mut self, mut entry: FileEntry) {
+        if let Some(existing) = self.files.get(&entry.key) {
+            entry.ordinal = existing.ordinal;
+        } else {
+            entry.ordinal = self.next_ordinal;
+            self.next_ordinal = self.next_ordinal.saturating_add(1);
+            self.keys_by_ordinal
+                .insert(entry.ordinal, entry.key.clone());
+        }
+        self.files.insert(entry.key.clone(), entry);
+    }
+
+    /// Removes a file, reporting whether it was there. Its ordinal is never used again.
+    pub fn remove(&mut self, key: &str) -> bool {
+        let Some(entry) = self.files.remove(key) else {
+            return false;
+        };
+        self.keys_by_ordinal.remove(&entry.ordinal);
+        true
+    }
+
+    /// Records that a file's current content is in the index, with how many of its parts the
+    /// extraction could not read, reporting whether the file was there.
+    pub fn mark_ready(&mut self, key: &str, unread_parts: u32) -> bool {
+        let Some(entry) = self.files.get_mut(key) else {
+            return false;
+        };
+        entry.status = FileStatus::Ready;
+        entry.reason = None;
+        entry.unread_parts = unread_parts;
+        true
+    }
+
+    /// Records why a file is not ready, which also sets its status, reporting whether it was
+    /// there.
+    pub fn record(&mut self, key: &str, reason: FileReason) -> bool {
+        let Some(entry) = self.files.get_mut(key) else {
+            return false;
+        };
+        entry.status = reason.status();
+        entry.reason = Some(reason);
+        entry.unread_parts = 0;
+        true
+    }
+
+    /// Makes a file wait for a job again at a new content version, reporting whether it was
+    /// there.
+    pub fn make_pending(&mut self, key: &str, content_version: ManifestVersion) -> bool {
+        let Some(entry) = self.files.get_mut(key) else {
+            return false;
+        };
+        entry.content_version = content_version;
+        entry.status = FileStatus::Pending;
+        entry.reason = None;
+        entry.unread_parts = 0;
+        true
+    }
+
+    /// Replaces a file's display name and attributes and leaves its content version and status
+    /// alone, reporting whether it was there.
+    pub fn describe(
+        &mut self,
+        key: &str,
+        display_name: Option<String>,
+        attributes: Attributes,
+    ) -> bool {
+        let Some(entry) = self.files.get_mut(key) else {
+            return false;
+        };
+        entry.display_name = display_name;
+        entry.attributes = attributes;
+        true
+    }
+
+    /// The total size of the files, in bytes.
+    pub fn total_size(&self) -> u64 {
+        self.files
+            .values()
+            .fold(0, |total, file| total.saturating_add(file.size))
+    }
+
+    /// Divides the table at `key`, which starts the second part. Ordinals carry over unchanged,
+    /// and neither part can reuse one, so segments the two parts share stay valid.
+    pub fn split_at(&self, key: &str) -> (FileTable, FileTable) {
+        let mut parts = (self.empty_like(), self.empty_like());
+        for (name, entry) in &self.files {
+            let part = if name.as_str() < key {
+                &mut parts.0
+            } else {
+                &mut parts.1
+            };
+            part.keys_by_ordinal.insert(entry.ordinal, name.clone());
+            part.files.insert(name.clone(), entry.clone());
+        }
+        parts
+    }
+
+    fn empty_like(&self) -> FileTable {
+        FileTable {
+            next_ordinal: self.next_ordinal,
+            ..FileTable::default()
+        }
+    }
+
+    /// Every file, in key order.
+    pub fn iter(&self) -> impl Iterator<Item = &FileEntry> {
+        self.files.values()
+    }
+
+    /// How many files the table holds.
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Whether the table holds no files.
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    /// The Parquet bytes stored for this table.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Encoding`](crate::Error::Encoding) if encoding fails.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        let files: Vec<&FileEntry> = self.files.values().collect();
+        let attributes = files
+            .iter()
+            .map(|file| serde_json::to_string(&file.attributes))
+            .collect::<serde_json::Result<Vec<_>>>()
+            .map_err(|source| Error::Encoding(EncodingError::new(source)))?;
+        let reasons = files
+            .iter()
+            .map(|file| file.reason.as_ref().map(serde_json::to_string).transpose())
+            .collect::<serde_json::Result<Vec<_>>>()
+            .map_err(|source| Error::Encoding(EncodingError::new(source)))?;
+        let display_names: Vec<Option<&str>> = files
+            .iter()
+            .map(|file| file.display_name.as_deref())
+            .collect();
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(UInt64Array::from_iter_values(
+                files.iter().map(|f| f.ordinal),
+            )),
+            Arc::new(StringArray::from_iter_values(files.iter().map(|f| &f.key))),
+            Arc::new(UInt64Array::from_iter_values(files.iter().map(|f| f.size))),
+            Arc::new(StringArray::from_iter_values(
+                files.iter().map(|f| f.etag.as_str()),
+            )),
+            Arc::new(UInt64Array::from_iter_values(
+                files.iter().map(|f| f.content_version.get()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                files.iter().map(|f| f.status.as_str()),
+            )),
+            Arc::new(StringArray::from(reasons)),
+            Arc::new(StringArray::from(display_names)),
+            Arc::new(StringArray::from_iter_values(attributes)),
+            Arc::new(UInt32Array::from_iter_values(
+                files.iter().map(|f| f.unread_parts),
+            )),
+        ];
+        stored::write(
+            schema(),
+            columns,
+            FORMAT,
+            vec![(NEXT_ORDINAL, self.next_ordinal.to_string())],
+        )
+    }
+
+    /// Reads a stored table.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedFormat`](crate::Error::UnsupportedFormat) for a newer format,
+    /// and an error for bytes that do not decode or a table that is inconsistent.
+    pub fn decode(bytes: Bytes) -> Result<Self> {
+        let stored = stored::read(bytes, FORMAT)?;
+        let next_ordinal = stored
+            .metadata
+            .get(NEXT_ORDINAL)
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| malformed("the next ordinal is missing"))?;
+        let mut table = FileTable {
+            next_ordinal,
+            ..FileTable::default()
+        };
+        for batch in &stored.batches {
+            let ordinals = required::<UInt64Array>(batch, ORDINAL)?;
+            let keys = required::<StringArray>(batch, KEY)?;
+            let sizes = required::<UInt64Array>(batch, SIZE)?;
+            let etags = required::<StringArray>(batch, ETAG)?;
+            let versions = required::<UInt64Array>(batch, CONTENT_VERSION)?;
+            let statuses = required::<StringArray>(batch, STATUS)?;
+            let reasons = optional::<StringArray>(batch, REASON)?;
+            let names = optional::<StringArray>(batch, DISPLAY_NAME)?;
+            let attributes = required::<StringArray>(batch, ATTRIBUTES)?;
+            let unread = required::<UInt32Array>(batch, UNREAD_PARTS)?;
+            for row in 0..batch.num_rows() {
+                let attributes: Attributes = serde_json::from_str(attributes.value(row))
+                    .map_err(|_cause| malformed("a file's attributes do not decode"))?;
+                let status = FileStatus::parse(statuses.value(row))?;
+                let reason = if reasons.is_null(row) {
+                    None
+                } else {
+                    let reason: FileReason = serde_json::from_str(reasons.value(row))
+                        .map_err(|_cause| malformed("a file's reason does not decode"))?;
+                    Some(reason)
+                };
+                if reason.map_or(status, FileReason::status) != status
+                    || (reason.is_none()
+                        && !matches!(status, FileStatus::Pending | FileStatus::Ready))
+                {
+                    return Err(malformed("a file's reason does not fit its status"));
+                }
+                let unread_parts = unread.value(row);
+                if unread_parts > 0 && status != FileStatus::Ready {
+                    return Err(malformed("a file that is not ready has unread parts"));
+                }
+                table.restore(FileEntry {
+                    ordinal: ordinals.value(row),
+                    key: keys.value(row).to_owned(),
+                    size: sizes.value(row),
+                    etag: ETag::new(etags.value(row))?,
+                    content_version: ManifestVersion::new(versions.value(row))?,
+                    status,
+                    reason,
+                    display_name: (!names.is_null(row)).then(|| names.value(row).to_owned()),
+                    attributes,
+                    unread_parts,
+                })?;
+            }
+        }
+        Ok(table)
+    }
+
+    fn restore(&mut self, entry: FileEntry) -> Result<()> {
+        if entry.ordinal >= self.next_ordinal {
+            return Err(malformed("a file's ordinal is past the next ordinal"));
+        }
+        if self.keys_by_ordinal.contains_key(&entry.ordinal) {
+            return Err(malformed("two files share an ordinal"));
+        }
+        if self.files.contains_key(&entry.key) {
+            return Err(malformed("two files share a key"));
+        }
+        self.keys_by_ordinal
+            .insert(entry.ordinal, entry.key.clone());
+        self.files.insert(entry.key.clone(), entry);
+        Ok(())
+    }
+}
+
+fn schema() -> Schema {
+    Schema::new(vec![
+        Field::new(ORDINAL, DataType::UInt64, false),
+        Field::new(KEY, DataType::Utf8, false),
+        Field::new(SIZE, DataType::UInt64, false),
+        Field::new(ETAG, DataType::Utf8, false),
+        Field::new(CONTENT_VERSION, DataType::UInt64, false),
+        Field::new(STATUS, DataType::Utf8, false),
+        Field::new(REASON, DataType::Utf8, true),
+        Field::new(DISPLAY_NAME, DataType::Utf8, true),
+        Field::new(ATTRIBUTES, DataType::Utf8, false),
+        Field::new(UNREAD_PARTS, DataType::UInt32, false),
+    ])
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use cosmosearch_core::{AttributeValue, LimitKind};
+
+    use super::*;
+
+    fn entry(key: &str) -> FileEntry {
+        FileEntry::pending(
+            key,
+            5,
+            ETag::new("9f3a").unwrap(),
+            ManifestVersion::new(3).unwrap(),
+        )
+    }
+
+    fn round_trip(table: &FileTable) -> FileTable {
+        FileTable::decode(Bytes::from(table.encode().unwrap())).unwrap()
+    }
+
+    #[test]
+    fn a_table_round_trips_with_names_and_attributes() {
+        let mut table = FileTable::new();
+        let attributes = Attributes::from([
+            ("owner".to_owned(), AttributeValue::One("legal".to_owned())),
+            (
+                "labels".to_owned(),
+                AttributeValue::Many(vec!["a".to_owned(), "b".to_owned()]),
+            ),
+        ]);
+        table.insert(
+            entry("docs/a.txt")
+                .with_display_name(Some("Contract A".to_owned()))
+                .with_attributes(attributes),
+        );
+        table.insert(entry("docs/b.txt"));
+        assert_eq!(round_trip(&table), table);
+    }
+
+    #[test]
+    fn an_empty_table_round_trips() {
+        assert_eq!(round_trip(&FileTable::new()), FileTable::new());
+    }
+
+    #[test]
+    fn inserting_replaces_and_removing_reports() {
+        let mut table = FileTable::new();
+        table.insert(entry("a"));
+        table.insert(entry("a"));
+        assert_eq!(table.len(), 1);
+        assert!(table.remove("a"));
+        assert!(!table.remove("a"));
+        assert!(table.is_empty());
+    }
+
+    #[test]
+    fn keeps_files_in_key_order() {
+        let mut table = FileTable::new();
+        for key in ["c", "a", "b"] {
+            table.insert(entry(key));
+        }
+        let keys: Vec<_> = table.iter().map(FileEntry::key).collect();
+        assert_eq!(keys, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_file_keeps_its_ordinal_when_it_changes() {
+        let mut table = FileTable::new();
+        table.insert(entry("a"));
+        table.insert(entry("b"));
+        let b = table.get("b").unwrap().ordinal();
+        table.insert(entry("b").with_display_name(Some("new".to_owned())));
+        assert_eq!(table.get("b").unwrap().ordinal(), b);
+        assert_eq!(table.by_ordinal(b).unwrap().display_name(), Some("new"));
+    }
+
+    #[test]
+    fn an_ordinal_is_never_used_again_even_after_a_round_trip() {
+        let mut table = FileTable::new();
+        table.insert(entry("a"));
+        table.insert(entry("b"));
+        let last = table.get("b").unwrap().ordinal();
+        assert!(table.remove("b"));
+        assert_eq!(table.by_ordinal(last), None);
+        let mut reloaded = round_trip(&table);
+        reloaded.insert(entry("c"));
+        assert!(reloaded.get("c").unwrap().ordinal() > last);
+    }
+
+    #[test]
+    fn a_ready_file_round_trips() {
+        let mut table = FileTable::new();
+        table.insert(entry("a"));
+        assert!(table.mark_ready("a", 0));
+        assert!(!table.mark_ready("gone", 0));
+        assert_eq!(
+            round_trip(&table).get("a").unwrap().status(),
+            FileStatus::Ready
+        );
+    }
+
+    #[test]
+    fn unread_parts_round_trip_and_clear_when_the_file_changes() {
+        let mut table = FileTable::new();
+        table.insert(entry("a"));
+        assert!(table.mark_ready("a", 3));
+        assert_eq!(round_trip(&table).get("a").unwrap().unread_parts(), 3);
+        assert!(table.make_pending("a", ManifestVersion::new(2).unwrap()));
+        assert_eq!(table.get("a").unwrap().unread_parts(), 0);
+    }
+
+    #[test]
+    fn a_reason_sets_the_status_and_round_trips() {
+        let limit = FileReason::Extraction(ExtractFailure::LimitExceeded(LimitKind::Pages));
+        let scan = FileReason::Extraction(ExtractFailure::NoText);
+        let cases = [
+            (limit, FileStatus::Failed),
+            (scan, FileStatus::Unsupported),
+            (FileReason::SourceMoved, FileStatus::Pending),
+        ];
+        for (reason, status) in cases {
+            let mut table = FileTable::new();
+            table.insert(entry("a"));
+            assert!(table.record("a", reason));
+            assert!(!table.record("gone", reason));
+            let stored = round_trip(&table);
+            let file = stored.get("a").unwrap();
+            assert_eq!((file.status(), file.reason()), (status, Some(reason)));
+        }
+    }
+
+    #[test]
+    fn ready_and_pending_again_both_clear_the_reason() {
+        let mut table = FileTable::new();
+        table.insert(entry("a"));
+        table.insert(entry("b"));
+        for key in ["a", "b"] {
+            assert!(table.record(key, FileReason::Extraction(ExtractFailure::Malformed)));
+        }
+        assert!(table.mark_ready("a", 0));
+        let later = ManifestVersion::new(9).unwrap();
+        assert!(table.make_pending("b", later));
+        assert!(!table.make_pending("gone", later));
+        let stored = round_trip(&table);
+        let a = stored.get("a").unwrap();
+        assert_eq!((a.status(), a.reason()), (FileStatus::Ready, None));
+        let b = stored.get("b").unwrap();
+        assert_eq!((b.status(), b.reason()), (FileStatus::Pending, None));
+        assert_eq!(b.content_version(), later);
+    }
+
+    #[test]
+    fn describing_a_file_keeps_its_content_version_status_and_ordinal() {
+        let mut table = FileTable::new();
+        table.insert(entry("a"));
+        assert!(table.mark_ready("a", 0));
+        let before = table.get("a").unwrap().clone();
+        let attributes =
+            Attributes::from([("owner".to_owned(), AttributeValue::One("legal".to_owned()))]);
+        assert!(table.describe("a", Some("Contract A".to_owned()), attributes.clone()));
+        assert!(!table.describe("gone", None, Attributes::new()));
+        let after = round_trip(&table).get("a").unwrap().clone();
+        assert_eq!(
+            (after.ordinal(), after.content_version(), after.status()),
+            (before.ordinal(), before.content_version(), before.status())
+        );
+        assert_eq!(after.display_name(), Some("Contract A"));
+        assert_eq!(after.attributes(), &attributes);
+    }
+
+    #[test]
+    fn the_reasons_on_disk_are_stable() {
+        let cases = [
+            (FileReason::SourceMoved, r#""SourceMoved""#),
+            (
+                FileReason::Extraction(ExtractFailure::Malformed),
+                r#"{"Extraction":"Malformed"}"#,
+            ),
+            (
+                FileReason::Extraction(ExtractFailure::BadLocator),
+                r#"{"Extraction":"BadLocator"}"#,
+            ),
+            (
+                FileReason::Extraction(ExtractFailure::NoText),
+                r#"{"Extraction":"NoText"}"#,
+            ),
+            (
+                FileReason::Extraction(ExtractFailure::Panicked),
+                r#"{"Extraction":"Panicked"}"#,
+            ),
+            (
+                FileReason::Extraction(ExtractFailure::LimitExceeded(LimitKind::Depth)),
+                r#"{"Extraction":{"LimitExceeded":"Depth"}}"#,
+            ),
+        ];
+        for (reason, stored) in cases {
+            assert_eq!(serde_json::to_string(&reason).unwrap(), stored);
+            assert_eq!(serde_json::from_str::<FileReason>(stored).unwrap(), reason);
+        }
+    }
+
+    #[test]
+    fn a_reason_reads_clearly() {
+        assert_eq!(
+            FileReason::Extraction(ExtractFailure::NoText).to_string(),
+            "the file has no extractable text"
+        );
+        assert_eq!(
+            FileReason::SourceMoved.to_string(),
+            "the recorded version of the file is gone"
+        );
+    }
+
+    #[test]
+    fn splitting_keeps_ordinals_and_neither_part_reuses_one() {
+        let mut table = FileTable::new();
+        for key in ["a", "b", "c"] {
+            table.insert(entry(key));
+        }
+        let (mut left, mut right) = table.split_at("b");
+        assert_eq!(left.len(), 1);
+        assert_eq!(right.len(), 2);
+        assert_eq!(
+            right.get("c").unwrap().ordinal(),
+            table.get("c").unwrap().ordinal()
+        );
+        left.insert(entry("a2"));
+        right.insert(entry("d"));
+        assert!(left.get("a2").unwrap().ordinal() >= 3);
+        assert!(right.get("d").unwrap().ordinal() >= 3);
+    }
+
+    #[test]
+    fn the_columns_on_disk_are_stable() {
+        let names: Vec<String> = schema()
+            .fields()
+            .iter()
+            .map(|f| format!("{}:{}", f.name(), f.data_type()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "ordinal:UInt64",
+                "key:Utf8",
+                "size:UInt64",
+                "etag:Utf8",
+                "content_version:UInt64",
+                "status:Utf8",
+                "reason:Utf8",
+                "display_name:Utf8",
+                "attributes:Utf8",
+                "unread_parts:UInt32",
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_a_newer_format() {
+        let bytes = stored::write(schema(), empty_columns(), FORMAT + 1, vec![]).unwrap();
+        let err = FileTable::decode(Bytes::from(bytes)).unwrap_err();
+        assert!(
+            matches!(err, Error::UnsupportedFormat { format } if format == FORMAT + 1),
+            "{err}"
+        );
+    }
+
+    fn empty_columns() -> Vec<ArrayRef> {
+        vec![
+            Arc::new(UInt64Array::from_iter_values([])),
+            Arc::new(StringArray::from_iter_values(Vec::<String>::new())),
+            Arc::new(UInt64Array::from_iter_values([])),
+            Arc::new(StringArray::from_iter_values(Vec::<String>::new())),
+            Arc::new(UInt64Array::from_iter_values([])),
+            Arc::new(StringArray::from_iter_values(Vec::<String>::new())),
+            Arc::new(StringArray::from(Vec::<Option<&str>>::new())),
+            Arc::new(StringArray::from(Vec::<Option<&str>>::new())),
+            Arc::new(StringArray::from_iter_values(Vec::<String>::new())),
+            Arc::new(UInt32Array::from_iter_values([])),
+        ]
+    }
+
+    #[test]
+    fn damaged_bytes_give_an_error_and_never_a_panic() {
+        FileTable::decode(Bytes::from_static(b"garbage")).unwrap_err();
+        let mut table = FileTable::new();
+        table.insert(entry("docs/a.txt").with_display_name(Some("name".to_owned())));
+        let good = table.encode().unwrap();
+        FileTable::decode(Bytes::copy_from_slice(&good[..good.len() / 2])).unwrap_err();
+        for at in 0..good.len() {
+            let mut bad = good.clone();
+            bad[at] ^= 0xff;
+            let _outcome = FileTable::decode(Bytes::from(bad));
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        #[test]
+        fn any_table_round_trips(
+            files in prop::collection::btree_map("[a-z/é]{1,20}", (any::<u64>(), "[a-f0-9]{1,16}", prop::option::of(".{0,12}")), 0..40),
+        ) {
+            let mut table = FileTable::new();
+            for (key, (size, tag, name)) in files {
+                let etag = ETag::new(tag).unwrap();
+                let version = ManifestVersion::new(7).unwrap();
+                table.insert(FileEntry::pending(key, size, etag, version).with_display_name(name));
+            }
+            prop_assert_eq!(round_trip(&table), table);
+        }
+    }
+}

@@ -1,0 +1,24 @@
+[package]
+name = "cosmosearch-format"
+description = "The file table and chunk records of the cosmosearch index."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+arrow-array.workspace = true
+arrow-schema.workspace = true
+bytes.workspace = true
+cosmosearch-core.workspace = true
+parquet.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

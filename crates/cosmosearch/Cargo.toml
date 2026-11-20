@@ -1,0 +1,87 @@
+[package]
+name = "cosmosearch"
+description = "Rust library for hybrid keyword and semantic search over large collections of files in S3-compatible storage, built for RAG, with no database dependency. Layered indexes and usage-based promotion keep search fast without the cost of indexing everything up front."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["search", "rag", "semantic-search", "full-text-search", "s3"]
+categories = ["text-processing", "database-implementations"]
+readme = "../../README.md"
+
+[features]
+default = []
+test-util = [
+    "cosmosearch-core/test-util",
+    "cosmosearch-heat?/test-util",
+    "cosmosearch-store/test-util",
+]
+s3 = ["cosmosearch-store/s3"]
+fs = ["cosmosearch-store/fs"]
+cache = ["dep:cosmosearch-cache"]
+csv = ["dep:cosmosearch-extract-csv"]
+docx = ["dep:cosmosearch-extract-docx"]
+html = ["dep:cosmosearch-extract-html"]
+json = ["dep:cosmosearch-extract-json"]
+pdf = ["dep:cosmosearch-extract-pdf"]
+embed-http = ["dep:cosmosearch-http", "cosmosearch-http/embed"]
+embed-local = ["dep:cosmosearch-embed-local"]
+heat = ["dep:cosmosearch-heat"]
+indexer = ["dep:cosmosearch-format", "dep:cosmosearch-indexer", "dep:futures-util"]
+lexical = ["dep:cosmosearch-lexical"]
+rerank-http = ["dep:cosmosearch-http", "cosmosearch-http/rerank"]
+rerank-local = ["dep:cosmosearch-rerank-local"]
+vector = ["dep:cosmosearch-vector"]
+
+[dependencies]
+cosmosearch-cache = { workspace = true, optional = true }
+cosmosearch-chunk.workspace = true
+cosmosearch-core.workspace = true
+cosmosearch-embed-local = { workspace = true, optional = true }
+cosmosearch-extract-csv = { workspace = true, optional = true }
+cosmosearch-extract-docx = { workspace = true, optional = true }
+cosmosearch-extract-html = { workspace = true, optional = true }
+cosmosearch-extract-json = { workspace = true, optional = true }
+cosmosearch-extract-pdf = { workspace = true, optional = true }
+cosmosearch-format = { workspace = true, optional = true }
+cosmosearch-heat = { workspace = true, optional = true }
+cosmosearch-http = { workspace = true, optional = true }
+cosmosearch-indexer = { workspace = true, optional = true }
+cosmosearch-lexical = { workspace = true, optional = true }
+cosmosearch-query.workspace = true
+cosmosearch-rerank-local = { workspace = true, optional = true }
+cosmosearch-store.workspace = true
+cosmosearch-vector = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+
+[dev-dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+cosmosearch-format = { path = "../cosmosearch-format" }
+cosmosearch-lexical = { path = "../cosmosearch-lexical" }
+cosmosearch-vector = { path = "../cosmosearch-vector" }
+futures-util.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread"] }
+
+[package.metadata.docs.rs]
+features = [
+    "s3", "fs", "cache", "csv", "docx", "html", "json", "pdf", "embed-http", "embed-local",
+    "heat", "indexer", "lexical", "rerank-http", "rerank-local", "vector",
+]
+
+[lints]
+workspace = true
+
+[[example]]
+name = "quickstart"
+required-features = ["fs", "indexer", "lexical"]
+test = true
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+required-features = ["test-util", "heat", "indexer", "vector"]

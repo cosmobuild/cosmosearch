@@ -1,0 +1,34 @@
+[package]
+name = "cosmosearch-http"
+description = "Embeddings and reranking over HTTP APIs for cosmosearch."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+embed = []
+rerank = []
+
+[dependencies]
+cosmosearch-core.workspace = true
+reqwest = { workspace = true, features = ["blocking", "rustls"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[package.metadata.docs.rs]
+features = ["embed", "rerank"]
+
+[lints]
+workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+required-features = ["embed", "rerank"]

@@ -1,0 +1,19 @@
+[package]
+name = "cosmosearch-chunk"
+description = "Runs cosmosearch extractors safely and turns their output into chunks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cosmosearch-core.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+cosmosearch-core = { path = "../cosmosearch-core", features = ["test-util"] }
+proptest.workspace = true
+
+[lints]
+workspace = true

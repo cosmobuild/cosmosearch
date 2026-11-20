@@ -1,0 +1,19 @@
+[package]
+name = "cosmosearch-extract-json"
+description = "JSON extractor for cosmosearch."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cosmosearch-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+cosmosearch-core = { path = "../cosmosearch-core", features = ["test-util"] }
+
+[lints]
+workspace = true

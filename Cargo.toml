@@ -1,0 +1,136 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/cosmobuild/cosmosearch"
+
+[workspace.dependencies]
+anyhow = "1.0.104"
+arrow-array = { version = "60", default-features = false }
+arrow-schema = { version = "60", default-features = false }
+async-trait = "0.1.92"
+blake3 = { version = "1.8.7", default-features = false }
+bytes = "1.12.1"
+cosmosearch-cache = { path = "crates/cosmosearch-cache", version = "0.1.0" }
+cosmosearch-chunk = { path = "crates/cosmosearch-chunk", version = "0.1.0" }
+cosmosearch-core = { path = "crates/cosmosearch-core", version = "0.1.0" }
+cosmosearch-embed-local = { path = "crates/cosmosearch-embed-local", version = "0.1.0" }
+cosmosearch-extract-csv = { path = "crates/cosmosearch-extract-csv", version = "0.1.0" }
+cosmosearch-extract-docx = { path = "crates/cosmosearch-extract-docx", version = "0.1.0" }
+cosmosearch-extract-html = { path = "crates/cosmosearch-extract-html", version = "0.1.0" }
+cosmosearch-extract-json = { path = "crates/cosmosearch-extract-json", version = "0.1.0" }
+cosmosearch-extract-pdf = { path = "crates/cosmosearch-extract-pdf", version = "0.1.0" }
+cosmosearch-format = { path = "crates/cosmosearch-format", version = "0.1.0" }
+cosmosearch-heat = { path = "crates/cosmosearch-heat", version = "0.1.0" }
+cosmosearch-http = { path = "crates/cosmosearch-http", version = "0.1.0" }
+cosmosearch-indexer = { path = "crates/cosmosearch-indexer", version = "0.1.0" }
+cosmosearch-lexical = { path = "crates/cosmosearch-lexical", version = "0.1.0" }
+cosmosearch-query = { path = "crates/cosmosearch-query", version = "0.1.0" }
+cosmosearch-rerank-local = { path = "crates/cosmosearch-rerank-local", version = "0.1.0" }
+cosmosearch-store = { path = "crates/cosmosearch-store", version = "0.1.0" }
+cosmosearch-vector = { path = "crates/cosmosearch-vector", version = "0.1.0" }
+candle-core = { version = "=0.11.1", default-features = false }
+candle-nn = { version = "=0.11.1", default-features = false }
+candle-transformers = { version = "=0.11.1", default-features = false }
+csv = { version = "1", default-features = false }
+flate2 = { version = "1.1.11", default-features = false, features = ["rust_backend"] }
+html5gum = { version = "=0.9.1", default-features = false }
+futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
+tokio = { version = "1.54.1", default-features = false }
+tracing = { version = "0.1.44", default-features = false }
+uuid = { version = "1.29.1", default-features = false, features = ["v4"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+insta = { version = "1.49.0", default-features = false }
+object_store = { version = "0.14.2", default-features = false }
+tantivy = { version = "=0.27.0", default-features = false, features = ["quickwit"] }
+tempfile = "3"
+reqwest = { version = "0.13.5", default-features = false }
+quick-xml = { version = "0.41.0", default-features = false }
+zip = { version = "=9.5.0", default-features = false, features = ["deflate-flate2"] }
+pdf-inspector = { version = "=1.25.2", default-features = false }
+tokenizers = { version = "=0.23.2", default-features = false, features = ["fancy-regex"] }
+parquet = { version = "=60.1.0", default-features = false, features = ["arrow", "snap"] }
+proptest = { version = "1.12.0", default-features = false, features = ["std"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+unused_lifetimes = "warn"
+redundant_imports = "warn"
+redundant_lifetimes = "warn"
+trivial_numeric_casts = "warn"
+ambiguous_negative_literals = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "warn"
+private_intra_doc_links = "warn"
+missing_crate_level_docs = "warn"
+unescaped_backticks = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"  # `ShardId` in `ids` and similar are clear names
+must_use_candidate = "allow"       # flags nearly every getter
+
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+exit = "warn"
+indexing_slicing = "warn"
+string_slice = "warn"
+unwrap_in_result = "warn"
+map_err_ignore = "warn"
+let_underscore_must_use = "warn"
+let_underscore_future = "warn"
+unused_result_ok = "warn"
+mem_forget = "warn"
+
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+
+assertions_on_result_states = "warn"
+clone_on_ref_ptr = "warn"
+redundant_clone = "warn"
+needless_collect = "warn"
+iter_over_hash_type = "warn"
+wildcard_enum_match_arm = "warn"
+rc_mutex = "warn"
+
+mod_module_files = "warn"
+disallowed_script_idents = "warn"
+empty_drop = "warn"
+empty_structs_with_brackets = "warn"
+empty_enum_variants_with_brackets = "warn"
+if_then_some_else_none = "warn"
+deref_by_slicing = "warn"
+redundant_type_annotations = "warn"
+renamed_function_params = "warn"
+semicolon_outside_block = "warn"
+unneeded_field_pattern = "warn"
+too_long_first_doc_paragraph = "warn"
+fn_to_numeric_cast_any = "warn"
+
+exhaustive_enums = "warn"
+exhaustive_structs = "warn"
+absolute_paths = "warn"
+string_add = "warn"
+format_push_string = "warn"
+missing_assert_message = "warn"
+rc_buffer = "warn"

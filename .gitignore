@@ -1,0 +1,57 @@
+# Build output
+/target/
+**/*.rs.bk
+*.pdb
+
+# Local data, test files and settings
+/data/
+*.local.*
+.env
+.env.*
+
+# Keys and certificates, as a safety net
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Editors and IDEs
+.idea/
+.vscode/
+.fleet/
+.zed/
+*.swp
+*.swo
+*~
+\#*\#
+.#*
+
+# AI coding tools
+/.claude/
+.cursor/
+.aider*
+
+# Operating systems
+.DS_Store
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Profiling, coverage and test tooling
+*.profraw
+*.profdata
+lcov.info
+/coverage/
+perf.data*
+flamegraph.svg
+mutants.out*/
+
+# Merge and patch leftovers
+*.orig
+*.rej
+
+# Python, for local helper scripts
+__pycache__/
+*.pyc
+.venv/

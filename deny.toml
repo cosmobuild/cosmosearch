@@ -1,0 +1,42 @@
+[graph]
+all-features = true
+
+[advisories]
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is unmaintained; it comes in through pdf-inspector, only reads fonts inside a parser we isolate, and goes when that crate moves off it" },
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained; it is a compile-time macro that comes in through gemm under candle, runs no code at run time, and goes when gemm moves off it" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; it comes in through arrow, parquet, object_store and lopdf, which we cannot drop, and goes when they move off it" },
+    { id = "RUSTSEC-2026-0542", reason = "humantime is unmaintained because it wraps chrono; it comes in through object_store and goes when that crate moves off it" },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = [
+    { crate = "ctor", reason = "no code runs before main" },
+    { crate = "inventory", wrappers = ["typetag"], reason = "no code runs before main; tantivy brings it in through typetag" },
+    { crate = "linkme", reason = "no code runs before main" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+[licenses]
+confidence-threshold = 0.93
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+]
+exceptions = [
+    { allow = ["CC0-1.0"], crate = "tiny-keccak" },
+    { allow = ["Zlib"], crate = "foldhash" },
+]
