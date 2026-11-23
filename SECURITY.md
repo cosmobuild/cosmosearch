@@ -47,7 +47,8 @@ ignored `If-Match` would return changed bytes, and that is not checked yet.
 
 **Access control.** cosmosearch has no users or permissions. Scopes and filters narrow a
 search, but `read` and `expand` return any indexed passage whose ref they are given. If refs
-come from your users, check that the user may access the ref's file before calling them. A
+come from your users, call `read_within` and `expand_within` with the same scope and filter
+you give that user's searches, or check that the user may access the ref's file yourself. A
 search returns at most 1,000 hits; query length is not limited, so bound it yourself.
 
 **Local files.** The local filesystem backend follows symbolic links, so a link inside a

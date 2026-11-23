@@ -12,6 +12,9 @@ All notable changes are listed here. The format follows
   compressed streams of a document decode to, in all, 128 MiB by default. The PDF extractor
   checks it before parsing, so a PDF that inflates far beyond its size fails with this limit
   instead of exhausting memory.
+- `Engine::read_within` and `Engine::expand_within` (and the same on `Reader`): reads that
+  take a scope and a filter, and refuse a file outside them as not in the index, so the
+  rules that limit a caller's searches also limit what the caller reads.
 
 ### Changed
 

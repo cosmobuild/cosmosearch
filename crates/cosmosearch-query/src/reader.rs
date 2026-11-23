@@ -3,9 +3,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use cosmosearch_core::{
-    CachedResults, ExtractLimits, FileSource, IndexError, IndexId, IndexKind, Manifest,
-    ManifestVersion, ModelId, Query, SearchIdentity, SegmentId, ShardId, SharedCache, SharedHeat,
-    SharedPassages, SharedReranker, SharedResults, Signal, SourceRef, Status, Usage,
+    CachedResults, ExtractLimits, FileSource, Filter, IndexError, IndexId, IndexKind, Manifest,
+    ManifestVersion, ModelId, Query, Scope, SearchIdentity, SegmentId, ShardId, SharedCache,
+    SharedHeat, SharedPassages, SharedReranker, SharedResults, Signal, SourceRef, Status, Usage,
 };
 use cosmosearch_store::{DataStore, IndexHandle, MetadataStore, OpenState};
 use tokio::time;
@@ -15,7 +15,7 @@ use crate::cached::{CacheView, CachedFiles};
 use crate::deadline;
 use crate::fuse::Fusion;
 use crate::passages::Passages;
-use crate::read::{Reach, Sources};
+use crate::read::{Access, Reach, Sources};
 use crate::search::{Reached, Searched};
 use crate::tables::{Loader, Tables};
 use crate::{
@@ -480,7 +480,8 @@ impl Reader {
     /// The file is extracted again with the extractor that indexed it, and every byte read is
     /// pinned to the ref's ETag. Any ref to an indexed passage inside the data location is
     /// read, whatever scope or filter the search that returned it had, so a host that takes
-    /// refs from users checks their access to the ref's file itself.
+    /// refs from users checks their access to the ref's file itself, or calls
+    /// [`Reader::expand_within`].
     ///
     /// # Errors
     ///
@@ -495,12 +496,57 @@ impl Reader {
         before: usize,
         after: usize,
     ) -> Result<Reading> {
+        self.read_reach(reference, Reach { before, after }, None)
+            .await
+    }
+
+    /// Reads the passage `reference` names, as [`Reader::read`] does, only if its file is in
+    /// `scope` and passes `filter`, as a search with them would require.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NotInIndex`] for a file outside `scope` or one that does not pass
+    /// `filter`, as for a file the index does not hold, so the error tells nothing about such
+    /// a file; otherwise as for [`Reader::expand`].
+    pub async fn read_within(
+        &self,
+        reference: &SourceRef,
+        scope: &Scope,
+        filter: &Filter,
+    ) -> Result<Reading> {
+        self.expand_within(reference, 0, 0, scope, filter).await
+    }
+
+    /// Reads the passage `reference` names with its neighbours, as [`Reader::expand`] does,
+    /// only if its file is in `scope` and passes `filter`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Reader::read_within`].
+    pub async fn expand_within(
+        &self,
+        reference: &SourceRef,
+        before: usize,
+        after: usize,
+        scope: &Scope,
+        filter: &Filter,
+    ) -> Result<Reading> {
+        let access = Access { scope, filter };
+        self.read_reach(reference, Reach { before, after }, Some(access))
+            .await
+    }
+
+    async fn read_reach(
+        &self,
+        reference: &SourceRef,
+        reach: Reach,
+        access: Option<Access<'_>>,
+    ) -> Result<Reading> {
         let (mut manifest, cache) = self.snapshot_for_call(None).await?;
         let mut loader = Loader::new(&self.index, &self.tables, cache);
-        let reach = Reach { before, after };
         let mut refreshed = false;
         loop {
-            match read::run(self.sources(&loader), &manifest, reference, reach).await {
+            match read::run(self.sources(&loader), &manifest, reference, reach, access).await {
                 Ok(chunks) => {
                     if let Some((shard, _)) = manifest.shard_for(reference.location().key()) {
                         self.record(Signal::Read, &[shard]);
