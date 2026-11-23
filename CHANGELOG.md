@@ -17,6 +17,10 @@ All notable changes are listed here. The format follows
 
 - A PDF that the decoded-bytes check cannot load fails as malformed, even where the parser
   could have repaired it.
+- A search whose scope names a prefix outside the data location fails with
+  `Error::ScopeOutsideData` instead of finding nothing. `Indexer::plan_embedding` and
+  `Indexer::file` refuse keys outside the data location, as `Indexer::apply` already did.
+  Keys are whole object keys in the store; the docs of `Scope` and `FileUpsert::new` say so.
 
 ## [0.1.0] - 2026-11-21
 

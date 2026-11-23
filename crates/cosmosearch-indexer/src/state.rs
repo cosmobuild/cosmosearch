@@ -77,12 +77,15 @@ impl Indexer {
     /// level it has reached.
     ///
     /// Reads the file table of the file's shard and, for a ready file, the chunk tables of that
-    /// shard's segments above L1, highest level first, until one holds the file.
+    /// shard's segments above L1, highest level first, until one holds the file. The key is a
+    /// whole object key, as for [`FileUpsert::new`](crate::FileUpsert::new).
     ///
     /// # Errors
     ///
-    /// Returns an error if the store fails or a stored table cannot be read.
+    /// Returns an error for a key outside the data location, and an error if the store fails
+    /// or a stored table cannot be read.
     pub async fn file(&self, key: &str) -> Result<Option<FileState>> {
+        self.check_key(key)?;
         let head = self.head().await?;
         let (_, shard) = shard_for(&head, key)?;
         let Some(entry) = self.load_table(shard).await?.get(key).cloned() else {

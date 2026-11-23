@@ -245,6 +245,13 @@ impl Indexer {
         &self.data
     }
 
+    /// Checks that `key` is a whole object key inside the data location.
+    pub(crate) fn check_key(&self, key: &str) -> Result<ObjectKey> {
+        let object = ObjectKey::new(key)?;
+        self.data.check_inside(&object)?;
+        Ok(object)
+    }
+
     pub(crate) async fn head(&self) -> Result<Manifest> {
         let head = self.index.head().await?.ok_or(Error::NoManifest)?;
         if !head.data_location().same_prefix(self.data.location()) {
@@ -277,23 +284,22 @@ impl Indexer {
         match change {
             FileChange::Upsert(upsert) => self.resolve_upsert(upsert).await,
             FileChange::Remove { key, expected } => {
-                self.data.check_inside(&ObjectKey::new(&key)?)?;
+                self.check_key(&key)?;
                 Ok(Step::Remove { key, expected })
             }
             FileChange::Retry { key, expected } => {
-                self.data.check_inside(&ObjectKey::new(&key)?)?;
+                self.check_key(&key)?;
                 Ok(Step::Retry { key, expected })
             }
             FileChange::Attributes(change) => {
-                self.data.check_inside(&ObjectKey::new(&change.key)?)?;
+                self.check_key(&change.key)?;
                 Ok(Step::Describe(change))
             }
         }
     }
 
     async fn resolve_upsert(&self, upsert: FileUpsert) -> Result<Step> {
-        let object = ObjectKey::new(&upsert.key)?;
-        self.data.check_inside(&object)?;
+        let object = self.check_key(&upsert.key)?;
         let (size, etag) = if let Some(fields) = upsert.fields {
             (fields.size, fields.etag)
         } else {

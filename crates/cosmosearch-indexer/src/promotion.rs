@@ -187,12 +187,13 @@ impl Indexer {
     /// Plans the eager embedding of the files `keys` names with `index`: per shard, one
     /// segment holding those that are ready and in no segment of that plug-in yet, added
     /// beside that plug-in's other segments. Files not in the index, not ready or already
-    /// held are left out, and a shard with none left gets no work.
+    /// held are left out, and a shard with none left gets no work. Keys are whole object keys,
+    /// as for [`FileUpsert::new`](crate::FileUpsert::new).
     ///
     /// # Errors
     ///
-    /// Returns [`Error::WrongLevel`] for a plug-in at L1 or below, and an error if the store
-    /// fails or a stored table cannot be read.
+    /// Returns [`Error::WrongLevel`] for a plug-in at L1 or below, an error for a key outside
+    /// the data location, and an error if the store fails or a stored table cannot be read.
     pub async fn plan_embedding(
         &self,
         index: &SharedIndex,
@@ -200,6 +201,9 @@ impl Indexer {
     ) -> Result<Vec<Promotion>> {
         let plugin = index.get();
         promotable(plugin)?;
+        for key in keys {
+            self.check_key(key)?;
+        }
         let head = self.head().await?;
         let mut wanted: BTreeMap<&ShardId, BTreeSet<&str>> = BTreeMap::new();
         for key in keys {

@@ -26,6 +26,10 @@ pub struct FileUpsert {
 
 impl FileUpsert {
     /// A file by key. Without [`FileUpsert::fields`], its size and ETag are read with one HEAD.
+    ///
+    /// The key is the file's whole object key in the store, not a path relative to the data
+    /// location: for data at `s3://example-bucket/docs/` it is `docs/a.pdf`, and for a local
+    /// folder it is the file's absolute path without the leading slash.
     pub fn new(key: impl Into<String>) -> Self {
         FileUpsert {
             key: key.into(),

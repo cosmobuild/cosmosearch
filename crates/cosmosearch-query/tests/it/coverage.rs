@@ -3,7 +3,7 @@ use cosmosearch_core::{
     Status,
 };
 use cosmosearch_indexer::{AttributeChange, FileChange};
-use cosmosearch_query::{Coverage, Reader, ReaderOptions, SearchRequest, SearchResults};
+use cosmosearch_query::{Coverage, Error, Reader, ReaderOptions, SearchRequest, SearchResults};
 use cosmosearch_store::{ObjectKey, WriteStore};
 
 use super::{Fixture, Tally, plugins};
@@ -45,6 +45,27 @@ async fn every_state() -> Fixture {
         .unwrap();
     f.reader.refresh().await.unwrap();
     f
+}
+
+#[tokio::test]
+async fn a_scope_prefix_outside_the_data_location_is_refused() {
+    let f = Fixture::new().await;
+    f.index(&[("docs/a.txt", b"refund policy")]).await;
+    for prefix in ["a.txt", "teama/", "docsx/"] {
+        let err = f
+            .reader
+            .search(&refund().scope(Scope::prefixes(&["docs/", prefix])))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, Error::ScopeOutsideData { prefix: found } if found == prefix),
+            "{err}"
+        );
+    }
+    for prefix in ["docs/a", "docs", "d", ""] {
+        let found = search(&f.reader, refund().scope(Scope::prefix(prefix))).await;
+        assert_eq!(found.hits().len(), 1, "{prefix}");
+    }
 }
 
 #[tokio::test]

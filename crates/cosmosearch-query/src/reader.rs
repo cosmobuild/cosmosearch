@@ -295,11 +295,12 @@ impl Reader {
     /// # Errors
     ///
     /// Returns [`Error::LimitTooLarge`] for a request asking for more than
-    /// [`SearchRequest::MAX_LIMIT`] hits, [`Error::IndexRemoved`] or [`Error::IndexReplaced`]
+    /// [`SearchRequest::MAX_LIMIT`] hits, [`Error::ScopeOutsideData`] for a scope prefix no
+    /// file of the data location can have, [`Error::IndexRemoved`] or [`Error::IndexReplaced`]
     /// if a refresh finds the index gone, and an error if the store, a stored table or an
     /// index plug-in fails.
     pub async fn search(&self, request: &SearchRequest) -> Result<SearchResults> {
-        request.check()?;
+        self.check(request)?;
         let deadline = request
             .budget
             .time()
@@ -668,6 +669,16 @@ impl Reader {
                 .number(limits.decoded_bytes())
                 .number(count(limits.depth())),
         )
+    }
+
+    fn check(&self, request: &SearchRequest) -> Result<()> {
+        request.check()?;
+        match request.scope.outside(self.data.location().prefix_key()) {
+            Some(prefix) => Err(Error::ScopeOutsideData {
+                prefix: prefix.to_owned(),
+            }),
+            None => Ok(()),
+        }
     }
 
     fn record(&self, signal: Signal, shards: &[&ShardId]) {

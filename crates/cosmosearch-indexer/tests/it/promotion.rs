@@ -412,3 +412,26 @@ async fn a_file_whose_content_moved_on_after_promotion_does_not_report_l2() {
     assert_eq!(f.level("docs/a.txt").await, Some(Level::L1));
     assert_eq!(f.level("docs/b.txt").await, Some(Level::L2));
 }
+
+#[tokio::test]
+async fn planning_and_file_lookups_refuse_keys_outside_the_data_location() {
+    let f = fixture(FileSource::HostNamed).await;
+    f.ready_files(&[("docs/a.txt", b"alpha words")]).await;
+    let err = f
+        .indexer
+        .plan_embedding(&vectors("m1"), &["a.txt".to_owned()])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Store(_)), "{err}");
+    let err = f.indexer.file("a.txt").await.unwrap_err();
+    assert!(matches!(err, Error::Store(_)), "{err}");
+    assert!(f.indexer.file("docs/a.txt").await.unwrap().is_some());
+    assert_eq!(
+        f.indexer
+            .plan_embedding(&vectors("m1"), &["docs/a.txt".to_owned()])
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
