@@ -122,9 +122,12 @@ any release.
 
 ## Releases
 
-Maintainers release all crates together at the same version. A release moves the
-changelog's Unreleased entries under the new version, passes `cargo publish --workspace
---dry-run`, is published to crates.io and is marked with a signed tag.
+Maintainers release all crates together at the same version. A release pull request raises
+the version and moves the changelog's Unreleased entries under it. Once it is merged, a
+maintainer pushes a signed tag `vX.Y.Z` on that commit. The release workflow checks the tag,
+the version and the changelog and runs `cargo publish --workspace --dry-run`. After a
+maintainer approves the `release` environment, it publishes every crate to crates.io through
+trusted publishing and creates the GitHub release from the changelog entry.
 
 ## Licence
 
