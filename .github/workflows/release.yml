@@ -1,0 +1,142 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+
+      - name: Check the tag, versions and changelog
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          metadata=$(cargo metadata --no-deps --format-version 1 --locked)
+          version=$(jq -r '[.packages[].version] | unique | if length == 1 then .[0] else error("the crates have different versions") end' <<<"$metadata")
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::tag $TAG does not match the crate version $version"; exit 1
+          fi
+          stale=$(jq -r --arg req "^$version" '
+            [.packages[].name] as $members
+            | .packages[] | .name as $from
+            | .dependencies[]
+            | select(.kind != "dev" and (.name as $n | $members | index($n)) and .req != $req)
+            | "\($from) -> \(.name) \(.req)"' <<<"$metadata")
+          if [ -n "$stale" ]; then
+            echo "::error::internal dependencies must require ^$version:"; echo "$stale"; exit 1
+          fi
+          if ! grep -q "^## \[$version\] - " CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no entry for $version"; exit 1
+          fi
+          ref=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG")
+          if [ "$(jq -r .object.type <<<"$ref")" != tag ]; then
+            echo "::error::$TAG is not an annotated tag"; exit 1
+          fi
+          verified=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$(jq -r .object.sha <<<"$ref")" --jq .verification.verified)
+          if [ "$verified" != true ]; then
+            echo "::error::GitHub does not verify the signature of $TAG"; exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "::error::$TAG points to a commit that is not on main"; exit 1
+          fi
+
+      - name: Package and verify every crate
+        run: cargo publish --workspace --dry-run --locked
+
+  publish:
+    name: Publish
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+
+      - name: Find the crates not yet published
+        id: pending
+        run: |
+          set -euo pipefail
+          metadata=$(cargo metadata --no-deps --format-version 1 --locked)
+          version=$(jq -r '.packages[0].version' <<<"$metadata")
+          exclude=""
+          for name in $(jq -r '.packages[].name' <<<"$metadata"); do
+            if curl -sSf -A "cosmosearch-release-workflow" "https://index.crates.io/${name:0:2}/${name:2:2}/$name" \
+              | jq -e --arg v "$version" 'select(.vers == $v)' >/dev/null; then
+              echo "$name $version is already on crates.io"
+              exclude="$exclude --exclude $name"
+            fi
+          done
+          echo "exclude=$exclude" >> "$GITHUB_OUTPUT"
+          if [ "$(wc -w <<<"$exclude")" -eq "$(( 2 * $(jq '.packages | length' <<<"$metadata") ))" ]; then
+            echo "all=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+        if: steps.pending.outputs.all != 'true'
+        id: auth
+
+      - name: Publish every crate
+        if: steps.pending.outputs.all != 'true'
+        run: cargo publish --workspace --locked --no-verify $EXCLUDE
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          EXCLUDE: ${{ steps.pending.outputs.exclude }}
+
+  github-release:
+    name: GitHub release
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create the release from the changelog entry
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "the release $TAG already exists"; exit 0
+          fi
+          version=${TAG#v}
+          awk -v head="## [$version]" '
+            index($0, head) == 1 { on = 1; next }
+            on && (/^## \[/ || /^\[[^]]+\]: /) { exit }
+            on { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "cosmosearch $version" --notes-file "$RUNNER_TEMP/notes.md"
