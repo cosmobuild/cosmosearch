@@ -24,6 +24,8 @@ All notable changes are listed here. The format follows
   `Error::ScopeOutsideData` instead of finding nothing. `Indexer::plan_embedding` and
   `Indexer::file` refuse keys outside the data location, as `Indexer::apply` already did.
   Keys are whole object keys in the store; the docs of `Scope` and `FileUpsert::new` say so.
+- The README lists the `test-util` feature, and the architecture guide says how key layout
+  and shard size decide what a promotion embeds.
 
 ## [0.1.0] - 2026-11-21
 

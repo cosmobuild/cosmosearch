@@ -114,6 +114,7 @@ None are on by default.
 | `embed-http`, `rerank-http` | Models behind an HTTP API |
 | `cache` | Memory and disk caches shared by every index in a process |
 | `heat` | Usage tracking that decides which parts get vectors |
+| `test-util` | For your tests: a fake embedder, reranker and clock, an in-memory store and a store that injects faults |
 
 ## Limits
 
