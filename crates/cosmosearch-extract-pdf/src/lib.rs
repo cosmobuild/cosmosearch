@@ -5,6 +5,7 @@
 
 #![warn(clippy::arithmetic_side_effects)]
 
+mod decoded;
 mod ligature;
 mod markup;
 mod pdf;

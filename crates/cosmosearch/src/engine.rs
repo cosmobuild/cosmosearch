@@ -3,10 +3,10 @@ use std::time::Duration;
 
 use cosmosearch_chunk::Extractors;
 use cosmosearch_core::{
-    ExtractLimits, Extractor, ExtractorProfile, FileSource, HeatSink, IndexId, IndexKind, Manifest,
-    ManifestVersion, PassageCache, Reranker, RerankerIdentity, ResultCache, SegmentCache,
-    SharedCache, SharedExtractor, SharedHeat, SharedIndex, SharedPassages, SharedReranker,
-    SharedResults, SourceRef,
+    ExtractLimits, Extractor, ExtractorProfile, FileSource, Filter, HeatSink, IndexId, IndexKind,
+    Manifest, ManifestVersion, PassageCache, Reranker, RerankerIdentity, ResultCache, Scope,
+    SegmentCache, SharedCache, SharedExtractor, SharedHeat, SharedIndex, SharedPassages,
+    SharedReranker, SharedResults, SourceRef,
 };
 use cosmosearch_query::{Plugins, Reader, ReaderOptions, Reading, SearchRequest, SearchResults};
 use cosmosearch_store::{DataStore, MetadataStore};
@@ -80,6 +80,10 @@ impl Engine {
 
     /// Reads the passage `reference` names, from the file version it was made from.
     ///
+    /// Any ref to an indexed passage inside the data location is read, whatever scope or
+    /// filter the search that returned it had. A host that takes refs from users checks their
+    /// access to the ref's file itself, or calls [`Engine::read_within`].
+    ///
     /// # Errors
     ///
     /// As for [`Reader::expand`].
@@ -88,7 +92,7 @@ impl Engine {
     }
 
     /// Reads the passage `reference` names with up to `before` and `after` neighbouring chunks
-    /// of the same file.
+    /// of the same file. Access is not checked, as for [`Engine::read`].
     ///
     /// # Errors
     ///
@@ -100,6 +104,41 @@ impl Engine {
         after: usize,
     ) -> Result<Reading> {
         self.reader.expand(reference, before, after).await
+    }
+
+    /// Reads the passage `reference` names only if its file is in `scope` and passes
+    /// `filter`, so the scope and filter that limit a caller's searches also limit what the
+    /// caller reads.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Reader::read_within`].
+    pub async fn read_within(
+        &self,
+        reference: &SourceRef,
+        scope: &Scope,
+        filter: &Filter,
+    ) -> Result<Reading> {
+        self.reader.read_within(reference, scope, filter).await
+    }
+
+    /// Reads the passage `reference` names with its neighbours only if its file is in `scope`
+    /// and passes `filter`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Reader::read_within`].
+    pub async fn expand_within(
+        &self,
+        reference: &SourceRef,
+        before: usize,
+        after: usize,
+        scope: &Scope,
+        filter: &Filter,
+    ) -> Result<Reading> {
+        self.reader
+            .expand_within(reference, before, after, scope, filter)
+            .await
     }
 
     /// Re-reads `INDEX` and moves to the newest manifest, returning its version.

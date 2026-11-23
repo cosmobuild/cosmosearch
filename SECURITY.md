@@ -17,9 +17,11 @@ These are part of the current design. They are documented rather than fixed, and
 that sharpen them are welcome.
 
 **Untrusted files.** Text extraction runs inside your process. A crafted PDF can make the
-PDF parser use unbounded memory or run for a long time, which can crash or stall the
+PDF parser use a lot of memory or run for a long time, which can crash or stall the
 process, and that can't be caught. Every file is limited in size, characters and chunks,
-and in pages, archive entries, expansion and nesting depth where the format has them.
+and in pages, archive entries, expansion, decoded bytes and nesting depth where the format
+has them. A PDF whose compressed streams decode to more than `ExtractLimits::decoded_bytes`
+fails before the parser reads it, and so does a PDF that this check cannot load.
 
 Extraction happens in two places. Indexing extracts every file once. Searching extracts a
 file again whenever it reads a passage back: `read` and `expand`, snippets that aren't in
@@ -45,7 +47,8 @@ ignored `If-Match` would return changed bytes, and that is not checked yet.
 
 **Access control.** cosmosearch has no users or permissions. Scopes and filters narrow a
 search, but `read` and `expand` return any indexed passage whose ref they are given. If refs
-come from your users, check that the user may access the ref's file before calling them. A
+come from your users, call `read_within` and `expand_within` with the same scope and filter
+you give that user's searches, or check that the user may access the ref's file yourself. A
 search returns at most 1,000 hits; query length is not limited, so bound it yourself.
 
 **Local files.** The local filesystem backend follows symbolic links, so a link inside a

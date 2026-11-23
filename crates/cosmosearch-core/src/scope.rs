@@ -6,6 +6,11 @@ use crate::KeyRange;
 /// The part of an index's data a search covers: the files whose object keys start with any
 /// of its prefixes.
 ///
+/// Keys are whole object keys in the store, not paths relative to the data location: for
+/// data at `s3://example-bucket/docs/` a prefix is `docs/contracts/`, and for a local folder
+/// it is the folder's absolute path without the leading slash. A search refuses a prefix
+/// outside the data location.
+///
 /// A search opens only the shards whose key ranges hold such keys, and counts only those
 /// shards as searched.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -70,6 +75,18 @@ impl Scope {
         self.prefixes
             .iter()
             .any(|prefix| prefix_covers(prefix, range))
+    }
+
+    /// The first prefix that no key under `root` can start with, if any: a key is under
+    /// `root` when it starts with `root` followed by `/`, and every key is under an empty
+    /// `root`.
+    pub fn outside(&self, root: &str) -> Option<&str> {
+        if root.is_empty() {
+            return None;
+        }
+        let under = format!("{root}/");
+        self.sorted_prefixes()
+            .find(|prefix| !prefix.starts_with(&under) && !under.starts_with(prefix))
     }
 
     /// The prefixes, none starting with another, in order.
@@ -161,6 +178,28 @@ mod tests {
         }
         assert!(Scope::all().contains(""));
         assert!(!Scope::prefixes(&[]).contains("docs/a"));
+    }
+
+    #[test]
+    fn finds_a_prefix_outside_the_root() {
+        let inside = Scope::prefixes(&["data/docs/a/", "data/docs/b.txt", "data/", "dat", ""]);
+        for prefix in inside.sorted_prefixes() {
+            assert_eq!(Scope::prefix(prefix).outside("data/docs"), None, "{prefix}");
+        }
+        assert_eq!(
+            Scope::prefix("docs/a/").outside("data/docs"),
+            Some("docs/a/")
+        );
+        assert_eq!(
+            Scope::prefix("data/docsx/").outside("data/docs"),
+            Some("data/docsx/")
+        );
+        assert_eq!(
+            Scope::prefixes(&["data/docs/a/", "teama/"]).outside("data/docs"),
+            Some("teama/")
+        );
+        assert_eq!(Scope::prefix("anything/").outside(""), None);
+        assert_eq!(Scope::prefixes(&[]).outside("data/docs"), None);
     }
 
     #[test]

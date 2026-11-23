@@ -4,8 +4,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 use cosmosearch_chunk::extract_chunks;
 use cosmosearch_core::{
-    ByteRange, Chunk, ETag, ExtractFailure, ExtractLimits, Extractor, ExtractorProfile, Level,
-    LimitKind, Location, Locator, Manifest, Passage, ShardEntry, SharedExtractor, SourceRef, Usage,
+    ByteRange, Chunk, ETag, ExtractFailure, ExtractLimits, Extractor, ExtractorProfile, Filter,
+    Level, LimitKind, Location, Locator, Manifest, Passage, Scope, ShardEntry, SharedExtractor,
+    SourceRef, Usage,
 };
 use cosmosearch_format::{ChunkRecord, ChunkTable, FileEntry};
 use cosmosearch_store::{DataStore, ObjectKey};
@@ -50,6 +51,13 @@ pub(crate) struct Reach {
     pub(crate) after: usize,
 }
 
+/// The files a caller may read: those in a scope that pass a filter.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Access<'a> {
+    pub(crate) scope: &'a Scope,
+    pub(crate) filter: &'a Filter,
+}
+
 /// What reading needs besides the snapshot.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Sources<'a> {
@@ -66,23 +74,31 @@ struct Found {
     last: usize,
 }
 
-/// Reads the passage `reference` names, and its neighbours within `reach`.
+/// Reads the passage `reference` names, and its neighbours within `reach`. A file outside
+/// `access` is reported as not in the index, before anything else about it is checked.
 pub(crate) async fn run(
     sources: Sources<'_>,
     manifest: &Manifest,
     reference: &SourceRef,
     reach: Reach,
+    access: Option<Access<'_>>,
 ) -> Result<Vec<Chunk>> {
     let location = reference.location();
     let key = inside_data(sources.data, reference)?;
     let not_in_index = || Error::NotInIndex {
         reference: reference.clone(),
     };
+    if access.is_some_and(|access| !access.scope.contains(location.key())) {
+        return Err(not_in_index());
+    }
     let (_, shard) = manifest
         .shard_for(location.key())
         .ok_or_else(not_in_index)?;
     let files = sources.loader.files(shard).await?;
     let entry = files.get(location.key()).ok_or_else(not_in_index)?;
+    if access.is_some_and(|access| !access.filter.matches(entry.attributes())) {
+        return Err(not_in_index());
+    }
     if !reference.is_current(entry.etag()) {
         return Err(Error::StaleRef {
             reference: reference.clone(),

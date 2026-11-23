@@ -100,6 +100,14 @@ pub enum Error {
         reference: SourceRef,
     },
 
+    /// A search's scope names a prefix that no file of the data location can have, such as
+    /// a path relative to the data location instead of a whole object key.
+    #[error("the scope prefix `{prefix}` is outside the data location")]
+    ScopeOutsideData {
+        /// The prefix.
+        prefix: String,
+    },
+
     /// A ref points at a file the index does not hold.
     #[error("`{reference}` names a file that is not in the index")]
     NotInIndex {

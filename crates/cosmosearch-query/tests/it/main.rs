@@ -17,9 +17,9 @@ use cosmosearch_chunk::Extractors;
 use cosmosearch_core::{
     AllowedRows, AttributeValue, Built, BuiltBy, ByteRange, Chunk, ETag, ExtractFailure,
     ExtractLimits, Extraction, Extractor, ExtractorProfile, FileSource, Filter, HeatSink, Hit,
-    Hits, Index, IndexError, IndexKind, KeyRange, Level, Locator, Passage, Query, SegmentEntry,
-    SegmentFile, SegmentFileName, SegmentId, SegmentSource, ShardEntry, ShardId, SharedExtractor,
-    SharedHeat, SharedIndex, Signal, SourceRef, Usage,
+    Hits, Index, IndexError, IndexKind, KeyRange, Level, Locator, Passage, Query, Scope,
+    SegmentEntry, SegmentFile, SegmentFileName, SegmentId, SegmentSource, ShardEntry, ShardId,
+    SharedExtractor, SharedHeat, SharedIndex, Signal, SourceRef, Usage,
 };
 use cosmosearch_extract_html::Html;
 use cosmosearch_indexer::{
@@ -510,6 +510,60 @@ async fn refuses_refs_outside_the_data_location_or_the_index() {
         ))
         .await;
     assert!(matches!(err, Error::NoPassage { .. }), "{err}");
+}
+
+#[tokio::test]
+async fn reads_within_a_scope_and_filter_refuse_other_files_as_not_indexed() {
+    let f = Fixture::new().await;
+    let chunks = f
+        .index(&[
+            ("docs/a/plan.txt", b"refund policy text"),
+            ("docs/b/plan.txt", b"refund launch budget"),
+        ])
+        .await;
+    let change = AttributeChange::new("docs/a/plan.txt")
+        .attribute("team", AttributeValue::One("a".to_owned()));
+    f.indexer
+        .apply(vec![FileChange::Attributes(change)])
+        .await
+        .unwrap();
+    f.reader.refresh().await.unwrap();
+    let source = |key: &str| {
+        chunks
+            .iter()
+            .find(|chunk| chunk.source().location().key() == key)
+            .unwrap()
+            .source()
+            .clone()
+    };
+    let (own, other) = (source("docs/a/plan.txt"), source("docs/b/plan.txt"));
+    let team_a = Filter::new().equals("team", "a");
+    let cases = [
+        (Scope::prefix("docs/a/"), Filter::new()),
+        (Scope::all(), team_a.clone()),
+        (Scope::prefix("docs/"), team_a),
+    ];
+    for (scope, filter) in &cases {
+        let read = f.reader.read_within(&own, scope, filter).await.unwrap();
+        assert_eq!(read.chunks().len(), 1);
+        f.reader
+            .expand_within(&own, 1, 1, scope, filter)
+            .await
+            .unwrap();
+        let err = f
+            .reader
+            .read_within(&other, scope, filter)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::NotInIndex { .. }), "{err}");
+        let err = f
+            .reader
+            .expand_within(&other, 1, 1, scope, filter)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::NotInIndex { .. }), "{err}");
+    }
+    assert_eq!(f.reader.read(&other).await.unwrap().chunks().len(), 1);
 }
 
 #[tokio::test]

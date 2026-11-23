@@ -6,6 +6,27 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `ExtractLimits::decoded_bytes` and `LimitKind::DecodedBytes`: the most bytes the
+  compressed streams of a document decode to, in all, 128 MiB by default. The PDF extractor
+  checks it before parsing, so a PDF that inflates far beyond its size fails with this limit
+  instead of exhausting memory.
+- `Engine::read_within` and `Engine::expand_within` (and the same on `Reader`): reads that
+  take a scope and a filter, and refuse a file outside them as not in the index, so the
+  rules that limit a caller's searches also limit what the caller reads.
+
+### Changed
+
+- A PDF that the decoded-bytes check cannot load fails as malformed, even where the parser
+  could have repaired it.
+- A search whose scope names a prefix outside the data location fails with
+  `Error::ScopeOutsideData` instead of finding nothing. `Indexer::plan_embedding` and
+  `Indexer::file` refuse keys outside the data location, as `Indexer::apply` already did.
+  Keys are whole object keys in the store; the docs of `Scope` and `FileUpsert::new` say so.
+- The README lists the `test-util` feature, and the architecture guide says how key layout
+  and shard size decide what a promotion embeds.
+
 ## [0.1.0] - 2026-11-21
 
 The first release.

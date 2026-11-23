@@ -114,6 +114,7 @@ None are on by default.
 | `embed-http`, `rerank-http` | Models behind an HTTP API |
 | `cache` | Memory and disk caches shared by every index in a process |
 | `heat` | Usage tracking that decides which parts get vectors |
+| `test-util` | For your tests: a fake embedder, reranker and clock, an in-memory store and a store that injects faults |
 
 ## Limits
 
@@ -121,8 +122,8 @@ None are on by default.
   segment's file and chunk tables in memory. For large corpora, use search scopes.
 - **Untrusted files.** Text extraction runs inside your process, both when indexing and when
   a search reads passages back (`read`, `expand`, snippets and reranking), and a crafted
-  PDF can use unbounded memory. If you index files you don't trust, run both in separate
-  processes; [SECURITY.md](https://github.com/cosmobuild/cosmosearch/blob/main/SECURITY.md)
+  PDF can use a lot of memory and time. If you index files you don't trust, run both in
+  separate processes; [SECURITY.md](https://github.com/cosmobuild/cosmosearch/blob/main/SECURITY.md)
   has the details.
 - **Text encoding and scans.** Text must be UTF-8. Scanned PDF pages are not read; results
   report a file with some scanned pages as only partly searched, and a fully scanned file as
@@ -133,6 +134,9 @@ None are on by default.
   local filesystem. In a local folder, a file's ETag comes from its inode, size and
   modification time, so change files by writing a new file and renaming it over the old
   one, not by rewriting them in place.
+- **Reading is not scoped.** `read` and `expand` return any indexed passage whose ref they
+  are given, whatever scope or filter the search had. If refs come from your users, use
+  `read_within` and `expand_within` with the scope and filter of that user's searches.
 - **No "not found" answer.** A search with no results ends `inconclusive`, never "absent":
   it tells you what it searched, but it does not claim that no answer exists.
 

@@ -87,7 +87,7 @@ async fn a_scope_keeps_only_its_files_within_a_shard() {
             Scope::prefixes(&["docs/b/", "docs/a/"]),
             &["docs/a/1.txt", "docs/b/1.txt"],
         ),
-        (Scope::prefix("logs/"), &[]),
+        (Scope::prefix("docs/c/"), &[]),
         (Scope::prefixes(&[]), &[]),
     ];
     for (scope, expected) in cases {

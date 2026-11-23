@@ -315,6 +315,13 @@ vectors.
 You run flushing, merging, planning and promotion as jobs, like indexing. A host can also
 promote a shard directly, or ask for specific files to be embedded right away.
 
+Because a shard is a range of keys, promoting it embeds every file in that range, whether
+or not those files are the ones being searched. Heat follows usage only as far as keys do:
+put what is used together next to each other, for example a tenant or collection prefix at
+the front of each key, rather than opaque ids that scatter related files across shards. A
+small index is one shard with the default size, so its first promotion embeds all of it;
+set a smaller shard size, or embed chosen files with `plan_embedding`.
+
 ## Caching
 
 All caches are optional, bounded, and shared by every engine you hand them to.
