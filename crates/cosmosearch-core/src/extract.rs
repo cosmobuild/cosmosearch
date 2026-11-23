@@ -15,6 +15,7 @@ const DEFAULT_FILE_BYTES: u64 = 128 * 1024 * 1024;
 const DEFAULT_ARCHIVE_ENTRIES: usize = 10_000;
 const DEFAULT_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_ARCHIVE_RATIO: u32 = 200;
+const DEFAULT_DECODED_BYTES: u64 = 128 * 1024 * 1024;
 const DEFAULT_DEPTH: usize = 256;
 
 /// One of the limits a caller sets on extraction.
@@ -35,6 +36,8 @@ pub enum LimitKind {
     ArchiveBytes,
     /// How many times larger than its compressed size an archive entry may be.
     ArchiveRatio,
+    /// Bytes the compressed streams of a document decode to, in all.
+    DecodedBytes,
     /// Nesting of elements in XML, or of values in JSON.
     Depth,
 }
@@ -49,6 +52,7 @@ impl fmt::Display for LimitKind {
             LimitKind::ArchiveEntries => "archive entries",
             LimitKind::ArchiveBytes => "archive bytes",
             LimitKind::ArchiveRatio => "archive ratio",
+            LimitKind::DecodedBytes => "decoded bytes",
             LimitKind::Depth => "nesting depth",
         })
     }
@@ -100,6 +104,7 @@ pub struct ExtractLimits {
     archive_entries: usize,
     archive_bytes: u64,
     archive_ratio: u32,
+    decoded_bytes: u64,
     depth: usize,
 }
 
@@ -113,6 +118,7 @@ impl Default for ExtractLimits {
             archive_entries: DEFAULT_ARCHIVE_ENTRIES,
             archive_bytes: DEFAULT_ARCHIVE_BYTES,
             archive_ratio: DEFAULT_ARCHIVE_RATIO,
+            decoded_bytes: DEFAULT_DECODED_BYTES,
             depth: DEFAULT_DEPTH,
         }
     }
@@ -157,6 +163,11 @@ impl ExtractLimits {
     /// How many times larger than its compressed size an archive entry may be.
     pub fn archive_ratio(&self) -> u32 {
         self.archive_ratio
+    }
+
+    /// The most bytes the compressed streams of a document decode to, in all.
+    pub fn decoded_bytes(&self) -> u64 {
+        self.decoded_bytes
     }
 
     /// The deepest nesting of elements in XML, or of values in JSON.
@@ -219,6 +230,13 @@ impl ExtractLimitsBuilder {
         self
     }
 
+    /// Sets the most bytes the compressed streams of a document decode to, in all.
+    #[must_use]
+    pub fn decoded_bytes(mut self, value: u64) -> Self {
+        self.0.decoded_bytes = value;
+        self
+    }
+
     /// Sets the deepest nesting of elements in XML, or of values in JSON.
     #[must_use]
     pub fn depth(mut self, value: usize) -> Self {
@@ -241,6 +259,7 @@ impl ExtractLimitsBuilder {
             (limits.archive_entries == 0, LimitKind::ArchiveEntries),
             (limits.archive_bytes == 0, LimitKind::ArchiveBytes),
             (limits.archive_ratio == 0, LimitKind::ArchiveRatio),
+            (limits.decoded_bytes == 0, LimitKind::DecodedBytes),
             (limits.depth == 0, LimitKind::Depth),
         ];
         match checks.into_iter().find(|(is_zero, _)| *is_zero) {

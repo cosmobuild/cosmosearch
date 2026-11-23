@@ -8,6 +8,7 @@ use cosmosearch_core::{
 use pdf_inspector::extractor::extract_text_with_positions_mem_pages;
 use pdf_inspector::{PageMarkdown, classify_pdf_mem, extract_pages_markdown_mem};
 
+use crate::decoded;
 use crate::ligature::{close_gaps, has_broken_ligatures};
 use crate::markup::{Page, clean_page};
 use crate::rows::{Placed, is_split, rows};
@@ -44,6 +45,7 @@ impl Extractor for Pdf {
     }
 
     fn extract(&self, file: &[u8], limits: &ExtractLimits) -> Result<Extraction, ExtractFailure> {
+        decoded::check(file, limits.decoded_bytes())?;
         let Ok(classified) = classify_pdf_mem(file) else {
             return Err(ExtractFailure::Malformed);
         };
@@ -282,6 +284,76 @@ mod tests {
             objects.len() + 1
         ));
         file.into_bytes()
+    }
+
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "a fixture builder working on one small test page"
+    )]
+    fn pdf_with_compressed_page(text: &str, decoded_bytes: usize, extra: &str) -> Vec<u8> {
+        use std::io::Write;
+
+        let mut content = format!("BT /F1 12 Tf 72 720 Td ({text}) Tj ET").into_bytes();
+        content.resize(decoded_bytes, b' ');
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        encoder.write_all(&content).unwrap();
+        let stream = encoder.finish().unwrap();
+        let objects: [Vec<u8>; 5] = [
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R \
+              /Resources << /Font << /F1 5 0 R >> >> >>"
+                .to_vec(),
+            [
+                format!(
+                    "<< /Length {} /Filter /FlateDecode {extra} >>\nstream\n",
+                    stream.len()
+                )
+                .as_bytes(),
+                &stream,
+                b"\nendstream",
+            ]
+            .concat(),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+        ];
+        let mut file = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(file.len());
+            file.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+            file.extend_from_slice(object);
+            file.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = file.len();
+        file.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
+        for offset in offsets {
+            file.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        file.extend_from_slice(
+            format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        file
+    }
+
+    #[test]
+    fn refuses_streams_that_decode_past_the_limit_before_parsing_them() {
+        const MIB: usize = 1024 * 1024;
+        let small = ExtractLimits::builder()
+            .decoded_bytes(1024 * 1024)
+            .build()
+            .unwrap();
+        let over = ExtractFailure::LimitExceeded(LimitKind::DecodedBytes);
+        for extra in ["", "/Type /XObject /Subtype /Image"] {
+            let bomb = pdf_with_compressed_page("Refunds take thirty days.", 2 * MIB, extra);
+            assert!(bomb.len() < 16 * 1024, "{}", bomb.len());
+            assert_eq!(extract(&bomb, &small).unwrap_err(), over, "{extra}");
+            let fits = pdf_with_compressed_page("Refunds take thirty days.", MIB / 2, extra);
+            assert_eq!(
+                extract(&fits, &small).unwrap()[0].text(),
+                "Refunds take thirty days.",
+                "{extra}"
+            );
+        }
     }
 
     #[test]

@@ -17,9 +17,11 @@ These are part of the current design. They are documented rather than fixed, and
 that sharpen them are welcome.
 
 **Untrusted files.** Text extraction runs inside your process. A crafted PDF can make the
-PDF parser use unbounded memory or run for a long time, which can crash or stall the
+PDF parser use a lot of memory or run for a long time, which can crash or stall the
 process, and that can't be caught. Every file is limited in size, characters and chunks,
-and in pages, archive entries, expansion and nesting depth where the format has them.
+and in pages, archive entries, expansion, decoded bytes and nesting depth where the format
+has them. A PDF whose compressed streams decode to more than `ExtractLimits::decoded_bytes`
+fails before the parser reads it, and so does a PDF that this check cannot load.
 
 Extraction happens in two places. Indexing extracts every file once. Searching extracts a
 file again whenever it reads a passage back: `read` and `expand`, snippets that aren't in

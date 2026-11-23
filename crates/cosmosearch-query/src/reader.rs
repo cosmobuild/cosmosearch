@@ -665,6 +665,7 @@ impl Reader {
                 .number(count(limits.archive_entries()))
                 .number(limits.archive_bytes())
                 .number(u64::from(limits.archive_ratio()))
+                .number(limits.decoded_bytes())
                 .number(count(limits.depth())),
         )
     }

@@ -121,8 +121,8 @@ None are on by default.
   segment's file and chunk tables in memory. For large corpora, use search scopes.
 - **Untrusted files.** Text extraction runs inside your process, both when indexing and when
   a search reads passages back (`read`, `expand`, snippets and reranking), and a crafted
-  PDF can use unbounded memory. If you index files you don't trust, run both in separate
-  processes; [SECURITY.md](https://github.com/cosmobuild/cosmosearch/blob/main/SECURITY.md)
+  PDF can use a lot of memory and time. If you index files you don't trust, run both in
+  separate processes; [SECURITY.md](https://github.com/cosmobuild/cosmosearch/blob/main/SECURITY.md)
   has the details.
 - **Text encoding and scans.** Text must be UTF-8. Scanned PDF pages are not read; results
   report a file with some scanned pages as only partly searched, and a fully scanned file as
