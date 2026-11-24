@@ -5,14 +5,14 @@ use std::sync::Arc;
 use arrow_array::{Array, ArrayRef, StringArray, UInt32Array, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
 use bytes::Bytes;
-use cosmosearch_core::{Attributes, ETag, ExtractFailure, ManifestVersion};
+use cosmosearch_core::{Attributes, ETag, ExtractFailure, ManifestVersion, MediaType};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{EncodingError, malformed};
 use crate::stored::{self, optional, required};
 use crate::{Error, Result};
 
-const FORMAT: u32 = 2;
+const FORMAT: u32 = 3;
 const NEXT_ORDINAL: &str = "cosmosearch.next_ordinal";
 
 const ORDINAL: &str = "ordinal";
@@ -23,6 +23,7 @@ const CONTENT_VERSION: &str = "content_version";
 const STATUS: &str = "status";
 const REASON: &str = "reason";
 const DISPLAY_NAME: &str = "display_name";
+const MEDIA_TYPE: &str = "media_type";
 const ATTRIBUTES: &str = "attributes";
 const UNREAD_PARTS: &str = "unread_parts";
 
@@ -101,6 +102,7 @@ pub struct FileEntry {
     status: FileStatus,
     reason: Option<FileReason>,
     display_name: Option<String>,
+    media_type: Option<MediaType>,
     attributes: Attributes,
     unread_parts: u32,
 }
@@ -122,6 +124,7 @@ impl FileEntry {
             status: FileStatus::Pending,
             reason: None,
             display_name: None,
+            media_type: None,
             attributes: Attributes::new(),
             unread_parts: 0,
         }
@@ -131,6 +134,13 @@ impl FileEntry {
     #[must_use]
     pub fn with_display_name(mut self, name: Option<String>) -> Self {
         self.display_name = name;
+        self
+    }
+
+    /// Sets the media type a host named for this file.
+    #[must_use]
+    pub fn with_media_type(mut self, media_type: Option<MediaType>) -> Self {
+        self.media_type = media_type;
         self
     }
 
@@ -179,6 +189,12 @@ impl FileEntry {
     /// The name a host shows for this file.
     pub fn display_name(&self) -> Option<&str> {
         self.display_name.as_deref()
+    }
+
+    /// The media type a host named for this file, which chooses its extractor ahead of the
+    /// key's extension.
+    pub fn media_type(&self) -> Option<&MediaType> {
+        self.media_type.as_ref()
     }
 
     /// The file's attributes.
@@ -358,6 +374,10 @@ impl FileTable {
             .iter()
             .map(|file| file.display_name.as_deref())
             .collect();
+        let media_types: Vec<Option<&str>> = files
+            .iter()
+            .map(|file| file.media_type.as_ref().map(MediaType::as_str))
+            .collect();
         let columns: Vec<ArrayRef> = vec![
             Arc::new(UInt64Array::from_iter_values(
                 files.iter().map(|f| f.ordinal),
@@ -375,6 +395,7 @@ impl FileTable {
             )),
             Arc::new(StringArray::from(reasons)),
             Arc::new(StringArray::from(display_names)),
+            Arc::new(StringArray::from(media_types)),
             Arc::new(StringArray::from_iter_values(attributes)),
             Arc::new(UInt32Array::from_iter_values(
                 files.iter().map(|f| f.unread_parts),
@@ -414,6 +435,7 @@ impl FileTable {
             let statuses = required::<StringArray>(batch, STATUS)?;
             let reasons = optional::<StringArray>(batch, REASON)?;
             let names = optional::<StringArray>(batch, DISPLAY_NAME)?;
+            let media_types = optional::<StringArray>(batch, MEDIA_TYPE)?;
             let attributes = required::<StringArray>(batch, ATTRIBUTES)?;
             let unread = required::<UInt32Array>(batch, UNREAD_PARTS)?;
             for row in 0..batch.num_rows() {
@@ -446,6 +468,11 @@ impl FileTable {
                     status,
                     reason,
                     display_name: (!names.is_null(row)).then(|| names.value(row).to_owned()),
+                    media_type: if media_types.is_null(row) {
+                        None
+                    } else {
+                        Some(MediaType::new(media_types.value(row))?)
+                    },
                     attributes,
                     unread_parts,
                 })?;
@@ -481,6 +508,7 @@ fn schema() -> Schema {
         Field::new(STATUS, DataType::Utf8, false),
         Field::new(REASON, DataType::Utf8, true),
         Field::new(DISPLAY_NAME, DataType::Utf8, true),
+        Field::new(MEDIA_TYPE, DataType::Utf8, true),
         Field::new(ATTRIBUTES, DataType::Utf8, false),
         Field::new(UNREAD_PARTS, DataType::UInt32, false),
     ])
@@ -508,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn a_table_round_trips_with_names_and_attributes() {
+    fn a_table_round_trips_with_names_media_types_and_attributes() {
         let mut table = FileTable::new();
         let attributes = Attributes::from([
             ("owner".to_owned(), AttributeValue::One("legal".to_owned())),
@@ -520,6 +548,7 @@ mod tests {
         table.insert(
             entry("docs/a.txt")
                 .with_display_name(Some("Contract A".to_owned()))
+                .with_media_type(Some(MediaType::new("text/markdown").unwrap()))
                 .with_attributes(attributes),
         );
         table.insert(entry("docs/b.txt"));
@@ -737,6 +766,7 @@ mod tests {
                 "status:Utf8",
                 "reason:Utf8",
                 "display_name:Utf8",
+                "media_type:Utf8",
                 "attributes:Utf8",
                 "unread_parts:UInt32",
             ]
@@ -761,6 +791,7 @@ mod tests {
             Arc::new(StringArray::from_iter_values(Vec::<String>::new())),
             Arc::new(UInt64Array::from_iter_values([])),
             Arc::new(StringArray::from_iter_values(Vec::<String>::new())),
+            Arc::new(StringArray::from(Vec::<Option<&str>>::new())),
             Arc::new(StringArray::from(Vec::<Option<&str>>::new())),
             Arc::new(StringArray::from(Vec::<Option<&str>>::new())),
             Arc::new(StringArray::from_iter_values(Vec::<String>::new())),

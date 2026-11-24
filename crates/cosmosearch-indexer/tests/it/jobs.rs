@@ -1,7 +1,7 @@
 use cosmosearch_chunk::Extractors;
 use cosmosearch_core::{
-    AllowedRows, ExtractFailure, ExtractLimits, Filter, Hit, Level, Query, RowSet, SegmentEntry,
-    SegmentSource, SharedIndex,
+    AllowedRows, ExtractFailure, ExtractLimits, Filter, Hit, Level, MediaType, Query, RowSet,
+    SegmentEntry, SegmentSource, SharedIndex,
 };
 use cosmosearch_format::ChunkTable;
 use cosmosearch_indexer::{ExtractOutcome, ExtractedFile, Plan, PublishOutcome};
@@ -616,5 +616,44 @@ async fn an_unknown_publish_is_reported_and_publishing_again_is_safe() {
     assert!(matches!(
         f.indexer.publish(&built).await.unwrap(),
         PublishOutcome::Published(_)
+    ));
+}
+
+#[tokio::test]
+async fn a_named_media_type_chooses_the_extractor_and_changing_it_indexes_the_file_again() {
+    let f = fixture(FileSource::HostNamed).await;
+    f.put("docs/notes", b"refund policy text").await;
+    let text = MediaType::new("text/plain").unwrap();
+    let outcomes = f
+        .send(vec![FileChange::Upsert(
+            FileUpsert::new("docs/notes").media_type(text.clone()),
+        )])
+        .await;
+    assert_eq!(outcomes, [ChangeOutcome::Applied]);
+    f.index_everything().await;
+    assert_eq!(f.status("docs/notes").await, FileStatus::Ready);
+    assert_eq!(
+        f.file("docs/notes").await.unwrap().media_type(),
+        Some(&text)
+    );
+    assert_eq!(f.live_keys_for("refund").await, ["docs/notes"]);
+
+    let outcomes = f
+        .send(vec![FileChange::Upsert(
+            FileUpsert::new("docs/notes").media_type(text),
+        )])
+        .await;
+    assert_eq!(outcomes, [ChangeOutcome::Unchanged]);
+
+    let outcomes = f
+        .send(vec![FileChange::Upsert(FileUpsert::new("docs/notes"))])
+        .await;
+    assert_eq!(outcomes, [ChangeOutcome::Applied]);
+    assert_eq!(f.status("docs/notes").await, FileStatus::Pending);
+    let plan = f.indexer.plan(10).await.unwrap();
+    let extracted = f.extract_all(&plan).await;
+    assert!(matches!(
+        extracted[0].outcome(),
+        ExtractOutcome::Failed(ExtractFailure::NoExtractor)
     ));
 }

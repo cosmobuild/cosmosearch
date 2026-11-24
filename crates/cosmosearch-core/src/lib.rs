@@ -29,6 +29,7 @@ mod ids;
 mod level;
 mod location;
 mod manifest;
+mod media;
 mod passages;
 mod plugin;
 mod refs;
@@ -72,6 +73,7 @@ pub use manifest::{
     BuiltBy, FileSource, IndexRecord, KeyRange, Manifest, ManifestObject, ManifestPointer,
     ManifestStub, SegmentEntry, SegmentFile, ShardEntry,
 };
+pub use media::MediaType;
 pub use passages::{PassageCache, SharedPassages};
 pub use plugin::{Extractor, Index, SharedExtractor, SharedIndex};
 pub use refs::{ByteRange, Locator, RowRange, SourceRef};

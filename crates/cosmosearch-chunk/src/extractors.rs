@@ -1,15 +1,16 @@
 use std::collections::BTreeMap;
 
-use cosmosearch_core::{ExtractorProfile, SharedExtractor};
+use cosmosearch_core::{ExtractorProfile, MediaType, SharedExtractor};
 
 use crate::{Markdown, PlainText, Result};
 
-/// The extractors a host registered: each found by its profile, and by the file name
-/// extensions it reads.
+/// The extractors a host registered: each found by its profile, and by the media types and
+/// file name extensions it reads.
 #[derive(Debug, Clone, Default)]
 pub struct Extractors {
-    by_profile: BTreeMap<ExtractorProfile, SharedExtractor>,
-    by_extension: BTreeMap<String, ExtractorProfile>,
+    profiles: BTreeMap<ExtractorProfile, SharedExtractor>,
+    extensions: BTreeMap<String, ExtractorProfile>,
+    media_types: BTreeMap<String, ExtractorProfile>,
 }
 
 impl Extractors {
@@ -30,45 +31,58 @@ impl Extractors {
         Ok(extractors)
     }
 
-    /// Adds `extractor`, which then reads the extensions it names in place of any added before.
-    /// Returns `false`, and changes nothing, if an extractor with the same profile is there.
+    /// Adds `extractor`, which then reads the media types and extensions it names in place of
+    /// any added before. Returns `false`, and changes nothing, if an extractor with the same
+    /// profile is there.
     pub fn insert(&mut self, extractor: SharedExtractor) -> bool {
         let profile = extractor.get().profile().clone();
-        if self.by_profile.contains_key(&profile) {
+        if self.profiles.contains_key(&profile) {
             return false;
         }
         for extension in extractor.get().extensions() {
-            self.by_extension
+            self.extensions
                 .insert(extension.to_ascii_lowercase(), profile.clone());
         }
-        self.by_profile.insert(profile, extractor);
+        for media_type in extractor.get().media_types() {
+            self.media_types
+                .insert(media_type.to_ascii_lowercase(), profile.clone());
+        }
+        self.profiles.insert(profile, extractor);
         true
     }
 
     /// The extractor with this profile.
     pub fn get(&self, profile: &ExtractorProfile) -> Option<&SharedExtractor> {
-        self.by_profile.get(profile)
+        self.profiles.get(profile)
     }
 
-    /// The extractor that reads the file with this key, chosen by its extension.
-    pub fn for_key(&self, key: &str) -> Option<&SharedExtractor> {
+    /// The extractor that reads the file with this key and media type: the one that reads the
+    /// media type, or else the one that reads the key's extension.
+    pub fn for_file(&self, key: &str, media_type: Option<&MediaType>) -> Option<&SharedExtractor> {
+        media_type
+            .and_then(|media_type| self.media_types.get(media_type.as_str()))
+            .and_then(|profile| self.profiles.get(profile))
+            .or_else(|| self.for_key(key))
+    }
+
+    fn for_key(&self, key: &str) -> Option<&SharedExtractor> {
         let name = key.rsplit('/').next().unwrap_or(key);
         let (stem, extension) = name.rsplit_once('.')?;
         if stem.is_empty() {
             return None;
         }
-        let profile = self.by_extension.get(&extension.to_ascii_lowercase())?;
-        self.by_profile.get(profile)
+        let profile = self.extensions.get(&extension.to_ascii_lowercase())?;
+        self.profiles.get(profile)
     }
 
     /// Every registered profile, in order.
     pub fn profiles(&self) -> impl Iterator<Item = &ExtractorProfile> {
-        self.by_profile.keys()
+        self.profiles.keys()
     }
 
     /// Whether an extractor with this profile is registered.
     pub fn contains(&self, profile: &ExtractorProfile) -> bool {
-        self.by_profile.contains_key(profile)
+        self.profiles.contains_key(profile)
     }
 }
 
@@ -79,7 +93,11 @@ mod tests {
     use super::*;
 
     #[derive(Debug)]
-    struct Named(ExtractorProfile, &'static [&'static str]);
+    struct Named(
+        ExtractorProfile,
+        &'static [&'static str],
+        &'static [&'static str],
+    );
 
     impl Extractor for Named {
         fn profile(&self) -> &ExtractorProfile {
@@ -90,23 +108,65 @@ mod tests {
             self.1
         }
 
+        fn media_types(&self) -> &[&str] {
+            self.2
+        }
+
         fn extract(&self, _: &[u8], _: &ExtractLimits) -> Result<Extraction, ExtractFailure> {
             Ok(Extraction::new(vec![]))
         }
     }
 
     fn named(profile: &str, extensions: &'static [&'static str]) -> SharedExtractor {
-        SharedExtractor::new(Named(ExtractorProfile::new(profile).unwrap(), extensions))
+        SharedExtractor::new(Named(
+            ExtractorProfile::new(profile).unwrap(),
+            extensions,
+            &[],
+        ))
     }
 
     fn chosen(extractors: &Extractors, key: &str) -> Option<String> {
+        chosen_as(extractors, key, None)
+    }
+
+    fn chosen_as(extractors: &Extractors, key: &str, media_type: Option<&str>) -> Option<String> {
+        let media_type = media_type.map(|value| MediaType::new(value).unwrap());
         extractors
-            .for_key(key)
+            .for_file(key, media_type.as_ref())
             .map(|found| found.get().profile().to_string())
     }
 
     #[test]
-    fn chooses_by_extension_ignoring_case() {
+    fn a_media_type_an_extractor_reads_wins_over_the_extension() {
+        let mut extractors = Extractors::builtin().unwrap();
+        assert!(extractors.insert(SharedExtractor::new(Named(
+            ExtractorProfile::new("pdf-1").unwrap(),
+            &["pdf"],
+            &["Application/PDF"],
+        ))));
+        let cases = [
+            ("docs/report", Some("application/pdf"), Some("pdf-1")),
+            (
+                "docs/report.txt",
+                Some("application/pdf; v=2"),
+                Some("pdf-1"),
+            ),
+            ("docs/notes.txt", Some("text/markdown"), Some("markdown-2")),
+            ("docs/notes.md", Some("image/png"), Some("markdown-2")),
+            ("docs/notes", Some("image/png"), None),
+            ("docs/notes.txt", None, Some("text-2")),
+        ];
+        for (key, media_type, expected) in cases {
+            assert_eq!(
+                chosen_as(&extractors, key, media_type).as_deref(),
+                expected,
+                "{key} {media_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn chooses_extensions_ignoring_case() {
         let extractors = Extractors::builtin().unwrap();
         let cases = [
             ("docs/a.txt", Some("text-2")),

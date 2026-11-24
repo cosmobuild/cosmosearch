@@ -1,4 +1,4 @@
-use cosmosearch_core::{AttributeValue, Attributes, ETag, ManifestVersion};
+use cosmosearch_core::{AttributeValue, Attributes, ETag, ManifestVersion, MediaType};
 
 /// A file's size and ETag, when the host already knows them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +20,7 @@ pub struct FileUpsert {
     pub(crate) key: String,
     pub(crate) fields: Option<StoreFields>,
     pub(crate) display_name: Option<String>,
+    pub(crate) media_type: Option<MediaType>,
     pub(crate) attributes: Attributes,
     pub(crate) expected: Option<ManifestVersion>,
 }
@@ -35,6 +36,7 @@ impl FileUpsert {
             key: key.into(),
             fields: None,
             display_name: None,
+            media_type: None,
             attributes: Attributes::new(),
             expected: None,
         }
@@ -51,6 +53,15 @@ impl FileUpsert {
     #[must_use]
     pub fn display_name(mut self, name: impl Into<String>) -> Self {
         self.display_name = Some(name.into());
+        self
+    }
+
+    /// Names the file's format, which chooses its extractor ahead of the key's extension. A
+    /// media type no registered extractor reads falls back to the extension. Changing it
+    /// indexes the file again.
+    #[must_use]
+    pub fn media_type(mut self, media_type: MediaType) -> Self {
+        self.media_type = Some(media_type);
         self
     }
 

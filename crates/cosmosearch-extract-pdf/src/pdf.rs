@@ -15,6 +15,7 @@ use crate::rows::{Placed, is_split, rows};
 use crate::running::remove_running_lines;
 
 const PDF_EXTENSIONS: [&str; 1] = ["pdf"];
+const PDF_MEDIA_TYPES: [&str; 1] = ["application/pdf"];
 const MIN_LINES_TO_JUDGE_HEADINGS: usize = 20;
 const MAX_HEADINGS_PER_THREE_LINES: usize = 1;
 const THREE_LINES: usize = 3;
@@ -42,6 +43,10 @@ impl Extractor for Pdf {
 
     fn extensions(&self) -> &[&str] {
         &PDF_EXTENSIONS
+    }
+
+    fn media_types(&self) -> &[&str] {
+        &PDF_MEDIA_TYPES
     }
 
     fn extract(&self, file: &[u8], limits: &ExtractLimits) -> Result<Extraction, ExtractFailure> {

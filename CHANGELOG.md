@@ -15,9 +15,14 @@ All notable changes are listed here. The format follows
 - `Engine::read_within` and `Engine::expand_within` (and the same on `Reader`): reads that
   take a scope and a filter, and refuse a file outside them as not in the index, so the
   rules that limit a caller's searches also limit what the caller reads.
+- `FileUpsert::media_type` names a file's format, which chooses its extractor ahead of the
+  key's extension, so files without an extension, or with a misleading one, can be indexed.
+  Extractors name the media types they read with `Extractor::media_types`, and the built-in
+  ones name theirs. Changing a file's media type indexes it again.
 
 ### Changed
 
+- The file table format changed, so indexes built by 0.1 must be built again.
 - A PDF that the decoded-bytes check cannot load fails as malformed, even where the parser
   could have repaired it.
 - A search whose scope names a prefix outside the data location fails with

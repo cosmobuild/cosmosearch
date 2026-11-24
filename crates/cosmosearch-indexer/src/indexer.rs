@@ -3,7 +3,7 @@ use std::num::NonZeroU64;
 
 use bytes::Bytes;
 use cosmosearch_core::{
-    Attributes, BuiltBy, ETag, FileSource, KeyRange, Level, Manifest, ManifestVersion,
+    Attributes, BuiltBy, ETag, FileSource, KeyRange, Level, Manifest, ManifestVersion, MediaType,
     SegmentEntry, SegmentFile, SegmentFileName, SegmentId, ShardEntry, ShardId,
 };
 use cosmosearch_format::{FileEntry, FileReason, FileStatus, FileTable};
@@ -56,6 +56,7 @@ struct Incoming {
     size: u64,
     etag: ETag,
     display_name: Option<String>,
+    media_type: Option<MediaType>,
     attributes: Attributes,
     expected: Expected,
 }
@@ -203,6 +204,7 @@ impl Indexer {
                 size,
                 etag,
                 display_name: None,
+                media_type: None,
                 attributes: Attributes::new(),
                 expected,
             }));
@@ -314,6 +316,7 @@ impl Indexer {
             size,
             etag,
             display_name: upsert.display_name,
+            media_type: upsert.media_type,
             attributes: upsert.attributes,
             expected: upsert.expected.into(),
         }))
@@ -589,7 +592,9 @@ fn apply_upsert(
     version: ManifestVersion,
 ) -> ChangeOutcome {
     let current = table.get(&incoming.key);
-    let same = current.is_some_and(|entry| entry.etag() == &incoming.etag);
+    let same = current.is_some_and(|entry| {
+        entry.etag() == &incoming.etag && entry.media_type() == incoming.media_type.as_ref()
+    });
     let moved = match incoming.expected {
         Expected::Any => false,
         Expected::At(version) => moved_on(table, &incoming.key, Some(version)),
@@ -608,6 +613,7 @@ fn apply_upsert(
         version,
     )
     .with_display_name(incoming.display_name.clone())
+    .with_media_type(incoming.media_type.clone())
     .with_attributes(incoming.attributes.clone());
     table.insert(entry);
     ChangeOutcome::Applied

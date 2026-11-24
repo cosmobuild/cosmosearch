@@ -8,6 +8,8 @@ use crate::body::{Paragraph, paragraphs};
 use crate::styles::HeadingStyles;
 
 const DOCX_EXTENSIONS: [&str; 1] = ["docx"];
+const DOCX_MEDIA_TYPES: [&str; 1] =
+    ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"];
 const DOCUMENT_PART: &str = "word/document.xml";
 const STYLES_PART: &str = "word/styles.xml";
 
@@ -37,6 +39,10 @@ impl Extractor for Docx {
 
     fn extensions(&self) -> &[&str] {
         &DOCX_EXTENSIONS
+    }
+
+    fn media_types(&self) -> &[&str] {
+        &DOCX_MEDIA_TYPES
     }
 
     fn extract(&self, file: &[u8], limits: &ExtractLimits) -> Result<Extraction, ExtractFailure> {
