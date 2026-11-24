@@ -888,3 +888,45 @@ async fn a_file_name_matches_with_less_weight_on_its_first_chunk_only() {
     let exact = search_exact(&handle, segments, "\"staff handbook\"", 10).await;
     assert_eq!(rows(&exact), Vec::<u64>::new());
 }
+
+#[tokio::test]
+async fn every_word_mode_needs_each_word_in_the_text_or_the_name() {
+    let handle = index().await;
+    let mut chunks = chunks_of(
+        "docs/refund-policy.txt",
+        &["annual plans only", "monthly plans"],
+    );
+    chunks.extend(chunks_of(
+        "docs/b.txt",
+        &["refund for annual plans", "refund for monthly plans"],
+    ));
+    let segment = store_chunks(&plugin(), &handle, "s1", &chunks).await;
+    let segments = std::slice::from_ref(&segment);
+    let bm25 = plugin();
+    let found = |query: Query| {
+        let bm25 = bm25.clone();
+        let handle = handle.clone();
+        async move {
+            let mut found = rows(&search_query(&bm25, &handle, segments, query).await);
+            found.sort_unstable();
+            found
+        }
+    };
+    assert_eq!(found(Query::new("refund annual")).await, [0, 2, 3]);
+    assert_eq!(
+        found(Query::new("refund annual").with_every_word()).await,
+        [0, 2]
+    );
+    assert_eq!(
+        found(Query::new("refund annual unknown").with_every_word()).await,
+        Vec::<u64>::new()
+    );
+    let phrase = Query::new("\"monthly plans\" refund")
+        .with_exact_phrases()
+        .with_every_word();
+    assert_eq!(found(phrase).await, [3]);
+    let phrase_only = Query::new("\"annual plans\"")
+        .with_exact_phrases()
+        .with_every_word();
+    assert_eq!(found(phrase_only).await, [0, 2]);
+}

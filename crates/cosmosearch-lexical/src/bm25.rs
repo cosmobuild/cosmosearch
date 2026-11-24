@@ -367,6 +367,7 @@ fn scoring_nothing(filter: DocPredicateQuery) -> Box<dyn TantivyQuery> {
 struct Wanted {
     loose: Vec<Term>,
     names: Vec<Term>,
+    every_word: bool,
     phrases: Vec<Vec<(usize, Term)>>,
 }
 
@@ -406,6 +407,7 @@ impl Wanted {
         Ok(Wanted {
             loose,
             names,
+            every_word: query.every_word(),
             phrases,
         })
     }
@@ -428,23 +430,54 @@ impl Wanted {
         terms
     }
 
-    fn query(&self, kept: Box<dyn TantivyQuery>) -> BooleanQuery {
+    /// The words outside quotes, each matching the text or the name: any
+    /// of them, or with `every_word`, all of them.
+    fn loose(&self) -> Box<dyn TantivyQuery> {
+        let word = |text: &Term, name: &Term| -> Box<dyn TantivyQuery> {
+            let in_text = TermQuery::new(text.clone(), IndexRecordOption::WithFreqs);
+            let in_name = TermQuery::new(name.clone(), IndexRecordOption::WithFreqs);
+            Box::new(BooleanQuery::new(vec![
+                (Occur::Should, Box::new(in_text)),
+                (
+                    Occur::Should,
+                    Box::new(BoostQuery::new(Box::new(in_name), NAME_WEIGHT)),
+                ),
+            ]))
+        };
+        if self.every_word {
+            let all = self
+                .loose
+                .iter()
+                .zip(&self.names)
+                .map(|(text, name)| (Occur::Must, word(text, name)))
+                .collect();
+            return Box::new(BooleanQuery::new(all));
+        }
         let text: Box<dyn TantivyQuery> =
             Box::new(BooleanQuery::new_multiterms_query(self.loose.clone()));
         let name: Box<dyn TantivyQuery> = Box::new(BoostQuery::new(
             Box::new(BooleanQuery::new_multiterms_query(self.names.clone())),
             NAME_WEIGHT,
         ));
-        let loose: Box<dyn TantivyQuery> = Box::new(BooleanQuery::new(vec![
+        Box::new(BooleanQuery::new(vec![
             (Occur::Should, text),
             (Occur::Should, name),
-        ]));
+        ]))
+    }
+
+    fn query(&self, kept: Box<dyn TantivyQuery>) -> BooleanQuery {
+        let loose = self.loose();
         if self.phrases.is_empty() {
             return BooleanQuery::new(vec![(Occur::Must, loose), (Occur::Must, kept)]);
         }
         let mut clauses = Vec::with_capacity(self.phrases.len().saturating_add(2));
         if !self.loose.is_empty() {
-            clauses.push((Occur::Should, loose));
+            let occur = if self.every_word {
+                Occur::Must
+            } else {
+                Occur::Should
+            };
+            clauses.push((occur, loose));
         }
         for phrase in &self.phrases {
             let required: Box<dyn TantivyQuery> = match phrase.as_slice() {

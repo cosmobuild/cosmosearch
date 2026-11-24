@@ -42,6 +42,9 @@ All notable changes are listed here. The format follows
   search hit, and `Engine::chunks_within` does so only within a scope and filter. The same
   calls are on `Reader`. `FileEntry`, `FileStatus` and `FileReason` are exported at the
   crate root.
+- `Query::with_every_word` asks keyword search for passages that hold every word outside
+  quotes, instead of any of them; exact phrases are required either way. The result cache
+  keeps the two modes apart.
 
 ### Changed
 

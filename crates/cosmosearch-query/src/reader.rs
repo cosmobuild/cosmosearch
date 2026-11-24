@@ -767,6 +767,7 @@ impl Reader {
         let mut identity = SearchIdentity::new()
             .text(request.query.text())
             .number(u64::from(request.query.exact_phrases()))
+            .number(u64::from(request.query.every_word()))
             .scope(&request.scope)
             .filter(&request.filter)
             .number(request.budget.shards().map_or(u64::MAX, count))

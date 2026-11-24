@@ -261,8 +261,9 @@ flowchart LR
    A query made with `with_exact_phrases` asks BM25 to read text in double quotes as a
    phrase: its hits must hold those words next to each other and in order. Word positions
    are read only for such a search. Otherwise quotes are ordinary text, so prose that quotes
-   something is searched like any other. The vector index embeds the query as written, so
-   its hits are not held to a phrase.
+   something is searched like any other. BM25 matches a passage holding any word of the
+   query, or with `with_every_word`, only one holding all of them. The vector index embeds
+   the query as written, so its hits are not held to a phrase or to every word.
 4. **Fuse.** The ranked lists are merged with reciprocal rank fusion, which needs no
    comparable scores. A list counts only for the files it covers, so a file without vectors
    isn't penalised for missing from the vector list. You can set the fusion constant and a
