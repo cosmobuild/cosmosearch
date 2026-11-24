@@ -56,11 +56,13 @@ struct ChunkFields {
     source: SourceRef,
     heading_path: Vec<String>,
     text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
 }
 
 impl From<ChunkFields> for Chunk {
     fn from(fields: ChunkFields) -> Self {
-        Chunk::new(fields.source, fields.heading_path, fields.text)
+        Chunk::new(fields.source, fields.heading_path, fields.text).with_name(fields.name)
     }
 }
 
@@ -70,6 +72,7 @@ impl From<Chunk> for ChunkFields {
             source: chunk.source,
             heading_path: chunk.heading_path,
             text: chunk.text,
+            name: chunk.name,
         }
     }
 }
@@ -82,6 +85,7 @@ pub struct Chunk {
     heading_path: Vec<String>,
     text: String,
     hash: ChunkHash,
+    name: Option<String>,
 }
 
 impl Chunk {
@@ -92,7 +96,21 @@ impl Chunk {
             heading_path,
             text,
             hash,
+            name: None,
         }
+    }
+
+    /// Sets the name a host shows for the chunk's file, which keyword search can match beside
+    /// the file's key. It is not part of the hash.
+    #[must_use]
+    pub fn with_name(mut self, name: Option<String>) -> Self {
+        self.name = name;
+        self
+    }
+
+    /// The name a host shows for the chunk's file, when the indexer set one.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 
     /// Where this text came from.

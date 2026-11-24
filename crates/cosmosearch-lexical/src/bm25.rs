@@ -1,5 +1,5 @@
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
@@ -32,6 +32,8 @@ use crate::Language;
 use crate::bundle::{Bundle, write_bundle};
 
 const TEXT: &str = "text";
+const NAME: &str = "name";
+const NAME_WEIGHT: f32 = 0.5;
 const ROW: &str = "row";
 const META_FILE: &str = "meta.json";
 const FILE_PREFIX: &str = "lex-";
@@ -90,19 +92,55 @@ impl Analyzer {
     }
 }
 
-fn schema(analyzer: Analyzer) -> (Schema, Field, Field) {
+struct Fields {
+    text: Field,
+    name: Field,
+    row: Field,
+}
+
+fn schema(analyzer: Analyzer) -> (Schema, Fields) {
     let mut builder = Schema::builder();
-    let indexing = TextFieldIndexing::default()
-        .set_tokenizer(&analyzer.tokenizer())
-        .set_index_option(IndexRecordOption::WithFreqsAndPositions);
-    let text = builder.add_text_field(TEXT, TextOptions::default().set_indexing_options(indexing));
+    let indexing = |option| {
+        let indexing = TextFieldIndexing::default()
+            .set_tokenizer(&analyzer.tokenizer())
+            .set_index_option(option);
+        TextOptions::default().set_indexing_options(indexing)
+    };
+    let text = builder.add_text_field(TEXT, indexing(IndexRecordOption::WithFreqsAndPositions));
+    let name = builder.add_text_field(NAME, indexing(IndexRecordOption::WithFreqs));
     let row = builder.add_u64_field(ROW, FAST);
-    (builder.build(), text, row)
+    (builder.build(), Fields { text, name, row })
+}
+
+/// What the name field holds for each chunk: for the first chunk of each file, the file's
+/// display name and the last part of its key without the extension; nothing for the others.
+fn names(chunks: &[Chunk]) -> Vec<Option<String>> {
+    let mut seen = BTreeSet::new();
+    chunks
+        .iter()
+        .map(|chunk| {
+            let key = chunk.source().location().key();
+            if !seen.insert(key) {
+                return None;
+            }
+            let last = key.rsplit('/').next().unwrap_or(key);
+            let stem = match last.rsplit_once('.') {
+                Some((stem, _)) if !stem.is_empty() => stem,
+                _ => last,
+            };
+            Some(match chunk.name() {
+                Some(name) => format!("{name}\n{stem}"),
+                None => stem.to_owned(),
+            })
+        })
+        .collect()
 }
 
 /// A BM25 keyword index, one bundled file per segment.
 ///
-/// A chunk matches if it holds any word of the query. For a query made with
+/// A chunk matches if it holds any word of the query. The first chunk of each file also
+/// matches the words of the file's name, its display name and the last part of its key
+/// without the extension, with half the weight of its text. For a query made with
 /// [`Query::with_exact_phrases`], text in double quotes is a phrase: a chunk matches only if it
 /// holds those words next to each other, in that order, whatever their case and the
 /// punctuation between them. Every phrase must match, and the other words rank the chunks that
@@ -217,8 +255,11 @@ fn open_reader_with(
     Ok((index, searcher))
 }
 
-fn build_bundle(texts: &[String], analyzer: Analyzer) -> Result<Vec<u8>, IndexError> {
-    let (schema, text, row) = schema(analyzer);
+fn build_bundle(
+    texts: &[(String, Option<String>)],
+    analyzer: Analyzer,
+) -> Result<Vec<u8>, IndexError> {
+    let (schema, fields) = schema(analyzer);
     let directory = RamDirectory::create();
     let index = TantivyIndex::create(directory.clone(), schema, IndexSettings::default())
         .map_err(engine)?;
@@ -227,10 +268,13 @@ fn build_bundle(texts: &[String], analyzer: Analyzer) -> Result<Vec<u8>, IndexEr
         .writer_with_num_threads(BUILD_THREADS, BUILD_MEMORY_BYTES)
         .map_err(engine)?;
     writer.set_merge_policy(Box::new(NoMergePolicy));
-    for (position, chunk_text) in texts.iter().enumerate() {
+    for (position, (chunk_text, name)) in texts.iter().enumerate() {
         let mut document = TantivyDocument::default();
-        document.add_text(text, chunk_text);
-        document.add_u64(row, u64::try_from(position).map_err(engine)?);
+        document.add_text(fields.text, chunk_text);
+        if let Some(name) = name {
+            document.add_text(fields.name, name);
+        }
+        document.add_u64(fields.row, u64::try_from(position).map_err(engine)?);
         writer.add_document(document).map_err(engine)?;
     }
     writer.commit().map_err(engine)?;
@@ -249,8 +293,10 @@ fn build_bundle(texts: &[String], analyzer: Analyzer) -> Result<Vec<u8>, IndexEr
 fn touch_what_opening_needs(bundle: Bundle) -> Result<(), IndexError> {
     let (index, searcher) = open_reader(bundle)?;
     let text = field(&index.schema(), TEXT)?;
+    let name = field(&index.schema(), NAME)?;
     for reader in searcher.segment_readers() {
         reader.inverted_index(text).map_err(engine)?;
+        reader.inverted_index(name).map_err(engine)?;
         reader.fast_fields().u64(ROW).map_err(engine)?;
     }
     Ok(())
@@ -314,16 +360,20 @@ fn scoring_nothing(filter: DocPredicateQuery) -> Box<dyn TantivyQuery> {
     Box::new(BoostQuery::new(Box::new(filter), FILTER_SCORE))
 }
 
-/// The words of a query: those outside quotes, any of which may match, and each quoted
-/// phrase, with every word at its position in the phrase.
+/// The words of a query: those outside quotes, any of which may match the text or, with
+/// less weight, the name, and each quoted phrase, with every word at its position in the
+/// phrase.
 struct Wanted {
     loose: Vec<Term>,
+    names: Vec<Term>,
     phrases: Vec<Vec<(usize, Term)>>,
 }
 
 impl Wanted {
     fn of(segment: &OpenSegment, query: &Query) -> Result<Self, IndexError> {
-        let field = field(&segment.index.schema(), TEXT)?;
+        let schema = segment.index.schema();
+        let field = field(&schema, TEXT)?;
+        let name = self::field(&schema, NAME)?;
         let mut analyzer = segment.index.tokenizer_for_field(field).map_err(engine)?;
         let mut tokens = |text: &str| {
             let mut found = Vec::new();
@@ -340,12 +390,23 @@ impl Wanted {
         let mut loose: Vec<Term> = tokens(&outside).into_iter().map(|(_, term)| term).collect();
         loose.sort_unstable();
         loose.dedup();
+        let names = loose
+            .iter()
+            .filter_map(|term| {
+                let value = term.value();
+                value.as_str().map(|word| Term::from_field_text(name, word))
+            })
+            .collect();
         let phrases = quoted
             .into_iter()
             .map(&mut tokens)
             .filter(|phrase| !phrase.is_empty())
             .collect();
-        Ok(Wanted { loose, phrases })
+        Ok(Wanted {
+            loose,
+            names,
+            phrases,
+        })
     }
 
     fn is_empty(&self) -> bool {
@@ -357,6 +418,7 @@ impl Wanted {
         let mut terms: BTreeMap<Term, bool> = self
             .loose
             .iter()
+            .chain(&self.names)
             .map(|term| (term.clone(), false))
             .collect();
         for (_, term) in self.phrases.iter().flatten() {
@@ -366,8 +428,16 @@ impl Wanted {
     }
 
     fn query(&self, kept: Box<dyn TantivyQuery>) -> BooleanQuery {
-        let loose: Box<dyn TantivyQuery> =
+        let text: Box<dyn TantivyQuery> =
             Box::new(BooleanQuery::new_multiterms_query(self.loose.clone()));
+        let name: Box<dyn TantivyQuery> = Box::new(BoostQuery::new(
+            Box::new(BooleanQuery::new_multiterms_query(self.names.clone())),
+            NAME_WEIGHT,
+        ));
+        let loose: Box<dyn TantivyQuery> = Box::new(BooleanQuery::new(vec![
+            (Occur::Should, text),
+            (Occur::Should, name),
+        ]));
         if self.phrases.is_empty() {
             return BooleanQuery::new(vec![(Occur::Must, loose), (Occur::Must, kept)]);
         }
@@ -417,13 +487,13 @@ async fn warm(segment: &OpenSegment, term: &Term, with_positions: bool) -> Resul
 
 struct GlobalStatistics {
     docs: u64,
-    tokens: u64,
+    tokens: BTreeMap<Field, u64>,
     doc_freq: BTreeMap<Term, u64>,
 }
 
 impl Bm25StatisticsProvider for GlobalStatistics {
-    fn total_num_tokens(&self, _: Field) -> tantivy::Result<u64> {
-        Ok(self.tokens)
+    fn total_num_tokens(&self, field: Field) -> tantivy::Result<u64> {
+        Ok(self.tokens.get(&field).copied().unwrap_or(0))
     }
 
     fn total_num_docs(&self) -> tantivy::Result<u64> {
@@ -435,18 +505,21 @@ impl Bm25StatisticsProvider for GlobalStatistics {
     }
 }
 
-/// One segment's share of the statistics: its documents, its tokens and each term's
-/// document frequency, in the order of the terms.
+/// One segment's share of the statistics: its documents, its tokens in each field the terms
+/// are in, and each term's document frequency, in the order of the terms.
 async fn segment_statistics(
     segment: &OpenSegment,
     terms: &[Term],
-) -> Result<(u64, u64, Vec<u64>), IndexError> {
-    let (mut docs, mut tokens) = (0u64, 0u64);
+) -> Result<(u64, BTreeMap<Field, u64>, Vec<u64>), IndexError> {
+    let fields: BTreeSet<Field> = terms.iter().map(Term::field).collect();
+    let mut docs = 0u64;
+    let mut tokens = BTreeMap::new();
     for reader in segment.searcher.segment_readers() {
         docs = docs.saturating_add(u64::from(reader.max_doc()));
-        if let Some(term) = terms.first() {
-            let inverted = reader.inverted_index(term.field()).map_err(engine)?;
-            tokens = tokens.saturating_add(inverted.total_num_tokens());
+        for field in &fields {
+            let inverted = reader.inverted_index(*field).map_err(engine)?;
+            let total: &mut u64 = tokens.entry(*field).or_insert(0);
+            *total = total.saturating_add(inverted.total_num_tokens());
         }
     }
     let mut doc_freq = Vec::with_capacity(terms.len());
@@ -470,18 +543,21 @@ async fn gather_statistics(
         .iter()
         .map(|segment| segment_statistics(segment, terms))
         .collect();
-    let shares: Vec<(u64, u64, Vec<u64>)> = stream::iter(gathering)
+    let shares: Vec<(u64, BTreeMap<Field, u64>, Vec<u64>)> = stream::iter(gathering)
         .buffer_unordered(STATISTICS_CONCURRENCY)
         .try_collect()
         .await?;
     let mut statistics = GlobalStatistics {
         docs: 0,
-        tokens: 0,
+        tokens: BTreeMap::new(),
         doc_freq: BTreeMap::new(),
     };
     for (docs, tokens, doc_freq) in shares {
         statistics.docs = statistics.docs.saturating_add(docs);
-        statistics.tokens = statistics.tokens.saturating_add(tokens);
+        for (field, found) in tokens {
+            let total = statistics.tokens.entry(field).or_insert(0);
+            *total = total.saturating_add(found);
+        }
         for (term, found) in terms.iter().zip(doc_freq) {
             let total = statistics.doc_freq.entry(term.clone()).or_insert(0);
             *total = total.saturating_add(found);
@@ -588,7 +664,11 @@ impl Index for Bm25 {
 
     async fn build(&self, segment: &SegmentId, chunks: &[Chunk]) -> Result<Built, IndexError> {
         let name = SegmentFileName::new(format!("{FILE_PREFIX}{segment}.bin")).map_err(engine)?;
-        let texts: Vec<String> = chunks.iter().map(Chunk::indexed_text).collect();
+        let texts: Vec<(String, Option<String>)> = chunks
+            .iter()
+            .map(Chunk::indexed_text)
+            .zip(names(chunks))
+            .collect();
         let analyzer = self.analyzer;
         let bundle = tokio::task::spawn_blocking(move || build_bundle(&texts, analyzer))
             .await

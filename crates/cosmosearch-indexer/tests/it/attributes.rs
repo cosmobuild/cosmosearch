@@ -44,9 +44,7 @@ async fn an_attribute_change_reads_nothing_and_leaves_the_content_indexed() {
         f.reads.load(Ordering::SeqCst),
     );
 
-    let change = AttributeChange::new("docs/a.txt")
-        .display_name("Refund policy")
-        .attribute("label", one("legal"));
+    let change = AttributeChange::new("docs/a.txt").attribute("label", one("legal"));
     assert_eq!(
         f.send(vec![FileChange::Attributes(change)]).await,
         [ChangeOutcome::Applied]
@@ -58,7 +56,6 @@ async fn an_attribute_change_reads_nothing_and_leaves_the_content_indexed() {
     assert_eq!(after.content_version(), before.content_version());
     assert_eq!(after.etag(), before.etag());
     assert_eq!(after.status(), FileStatus::Ready);
-    assert_eq!(after.display_name(), Some("Refund policy"));
     assert_eq!(after.attributes().get("label"), Some(&one("legal")));
     assert_eq!(f.l1_segments().await, segments);
     assert!(f.indexer.plan(10).await.unwrap().is_empty());
@@ -98,7 +95,8 @@ async fn an_attribute_change_replaces_what_was_there_and_checks_its_version() {
         entry.attributes(),
         &Attributes::from([("label".to_owned(), one("legal"))])
     );
-    assert_eq!(entry.content_version(), at);
+    assert!(entry.content_version() > at);
+    let at = entry.content_version();
 
     let version = f.version().await;
     let again = FileChange::Attributes(
@@ -252,4 +250,26 @@ async fn a_filtered_out_file_that_would_rank_first_never_takes_a_place() {
         f.keys_for("refund", &legal(), 2).await,
         ["docs/good.txt", "docs/fair.txt"]
     );
+}
+
+#[tokio::test]
+async fn a_new_display_name_indexes_the_file_again_so_search_finds_it_by_name() {
+    let f = fixture(FileSource::HostNamed).await;
+    f.named_file("docs/a.txt", b"refund policy").await;
+    f.index_everything().await;
+    let before = f.file("docs/a.txt").await.unwrap();
+    assert_eq!(f.live_keys_for("handbook").await, Vec::<String>::new());
+
+    let change = AttributeChange::new("docs/a.txt").display_name("Staff handbook");
+    assert_eq!(
+        f.send(vec![FileChange::Attributes(change)]).await,
+        [ChangeOutcome::Applied]
+    );
+    let after = f.file("docs/a.txt").await.unwrap();
+    assert_eq!(after.status(), FileStatus::Pending);
+    assert!(after.content_version() > before.content_version());
+
+    f.index_everything().await;
+    assert_eq!(f.status("docs/a.txt").await, FileStatus::Ready);
+    assert_eq!(f.live_keys_for("handbook").await, ["docs/a.txt"]);
 }

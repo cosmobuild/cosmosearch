@@ -172,7 +172,8 @@ and the reason. A transient read error leaves the file pending rather than faili
 Files can carry **attributes**: a display name and any values you attach, each a string, a
 list of strings, a number or a time. cosmosearch stores them as given, and search can filter
 on them. Changing attributes rewrites only the file table, with no re-reading or
-re-embedding. The file table also records each file's media type, when you name one, and
+re-embedding. Keyword search also matches a file's display name and the last part of its
+key, with less weight than its text, so a new display name indexes the file again. The file table also records each file's media type, when you name one, and
 its modified time, from the store or from you.
 
 ## Indexing jobs

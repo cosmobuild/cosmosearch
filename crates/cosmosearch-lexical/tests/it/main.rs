@@ -22,7 +22,11 @@ use cosmosearch_lexical::{Bm25, Language};
 use cosmosearch_store::{CreateOutcome, IndexHandle, MemoryStore, MetadataStore};
 
 fn chunks(texts: &[&str]) -> Vec<Chunk> {
-    let location: Location = "s3://example-bucket/docs/a.txt".parse().unwrap();
+    chunks_of("docs/a.txt", texts)
+}
+
+fn chunks_of(key: &str, texts: &[&str]) -> Vec<Chunk> {
+    let location: Location = format!("s3://example-bucket/{key}").parse().unwrap();
     let etag = ETag::new("9f3a").unwrap();
     texts
         .iter()
@@ -63,9 +67,18 @@ async fn store_segment_by(
     id: &str,
     texts: &[&str],
 ) -> SegmentEntry {
+    store_chunks(bm25, handle, id, &chunks(texts)).await
+}
+
+async fn store_chunks(
+    bm25: &Bm25,
+    handle: &IndexHandle,
+    id: &str,
+    chunks: &[Chunk],
+) -> SegmentEntry {
     let id = SegmentId::new(id).unwrap();
     let mut files = Vec::new();
-    for file in bm25.build(&id, &chunks(texts)).await.unwrap().into_files() {
+    for file in bm25.build(&id, chunks).await.unwrap().into_files() {
         let size = u64::try_from(file.body().len()).unwrap();
         let name = file.name().clone();
         handle
@@ -848,4 +861,30 @@ async fn a_stemmed_index_matches_other_forms_of_a_word_and_plain_does_not() {
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn a_file_name_matches_with_less_weight_on_its_first_chunk_only() {
+    let handle = index().await;
+    let mut chunks = chunks_of("docs/travel-policy.pdf", &["flights and hotels", "meals"]);
+    chunks.extend(
+        chunks_of("docs/b.txt", &["intro", "more"])
+            .into_iter()
+            .map(|chunk| chunk.with_name(Some("Staff Handbook".to_owned()))),
+    );
+    chunks.extend(chunks_of("docs/c.txt", &["the handbook says"]));
+    let segment = store_chunks(&plugin(), &handle, "s1", &chunks).await;
+    let segments = std::slice::from_ref(&segment);
+    assert_eq!(rows(&search(&handle, segments, "travel", 10).await), [0]);
+    assert_eq!(rows(&search(&handle, segments, "policy", 10).await), [0]);
+    assert_eq!(
+        rows(&search(&handle, segments, "pdf", 10).await),
+        Vec::<u64>::new()
+    );
+    assert_eq!(
+        rows(&search(&handle, segments, "handbook", 10).await),
+        [4, 2]
+    );
+    let exact = search_exact(&handle, segments, "\"staff handbook\"", 10).await;
+    assert_eq!(rows(&exact), Vec::<u64>::new());
 }

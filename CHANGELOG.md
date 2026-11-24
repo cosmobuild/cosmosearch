@@ -28,11 +28,17 @@ All notable changes are listed here. The format follows
   of 18 languages, so a search for `refund` also finds `refunds` and `refunded`. Its kind,
   such as `bm25-stem-en`, names the language, so a plug-in searches only the segments built
   the same way. `Bm25::new` does not stem, as before.
+- Keyword search matches a file's name: its display name and the last part of its key
+  without the extension, on the first chunk of the file and with half the weight of the
+  text. Words in quotes still match only the text.
 
 ### Changed
 
 - The file table format changed, so indexes built by 0.1 must be built again.
 - `Filter::matches` also takes the file's modified time.
+- A new display name, through `FileChange::Attributes`, makes the file wait for a job
+  again, because keyword search reads it. New attributes alone still change only the file
+  table.
 - A PDF that the decoded-bytes check cannot load fails as malformed, even where the parser
   could have repaired it.
 - A search whose scope names a prefix outside the data location fails with

@@ -28,6 +28,7 @@ pub struct FileJob {
     etag: ETag,
     content_version: ManifestVersion,
     media_type: Option<MediaType>,
+    display_name: Option<String>,
 }
 
 impl FileJob {
@@ -41,6 +42,7 @@ impl FileJob {
             etag: entry.etag().clone(),
             content_version: entry.content_version(),
             media_type: entry.media_type().cloned(),
+            display_name: entry.display_name().map(str::to_owned),
         }
     }
 
@@ -559,7 +561,11 @@ impl Indexer {
             (profile, Ok(found)) => ExtractOutcome::Chunks {
                 profile,
                 unread_parts: found.unread_parts(),
-                chunks: found.into_chunks(),
+                chunks: found
+                    .into_chunks()
+                    .into_iter()
+                    .map(|chunk| chunk.with_name(job.display_name.clone()))
+                    .collect(),
             },
             (_, Err(cosmosearch_chunk::Error::File(failure))) => ExtractOutcome::Failed(failure),
             (_, Err(err)) => return Err(err.into()),
