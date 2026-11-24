@@ -7,6 +7,7 @@ use cosmosearch_core::{
 use html5gum::{DefaultEmitter, Token, Tokenizer};
 
 const HTML_EXTENSIONS: [&str; 2] = ["html", "htm"];
+const HTML_MEDIA_TYPES: [&str; 2] = ["text/html", "application/xhtml+xml"];
 const BYTE_ORDER_MARK: char = '\u{feff}';
 const LONGEST_ENTITY_BYTES: usize = 40;
 const HEADINGS: [&[u8]; 6] = [b"h1", b"h2", b"h3", b"h4", b"h5", b"h6"];
@@ -87,6 +88,10 @@ impl Extractor for Html {
 
     fn extensions(&self) -> &[&str] {
         &HTML_EXTENSIONS
+    }
+
+    fn media_types(&self) -> &[&str] {
+        &HTML_MEDIA_TYPES
     }
 
     fn extract(&self, file: &[u8], _: &ExtractLimits) -> Result<Extraction, ExtractFailure> {

@@ -4,6 +4,7 @@ use crate::Result;
 use crate::split::{Span, decode, passages};
 
 const TEXT_EXTENSIONS: [&str; 1] = ["txt"];
+const TEXT_MEDIA_TYPES: [&str; 1] = ["text/plain"];
 
 /// Extracts plain text, grouping paragraphs into chunks.
 #[derive(Debug, Clone)]
@@ -27,6 +28,10 @@ impl Extractor for PlainText {
 
     fn extensions(&self) -> &[&str] {
         &TEXT_EXTENSIONS
+    }
+
+    fn media_types(&self) -> &[&str] {
+        &TEXT_MEDIA_TYPES
     }
 
     fn extract(&self, file: &[u8], _: &ExtractLimits) -> Result<Extraction, ExtractFailure> {

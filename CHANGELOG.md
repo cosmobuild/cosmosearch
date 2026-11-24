@@ -15,9 +15,30 @@ All notable changes are listed here. The format follows
 - `Engine::read_within` and `Engine::expand_within` (and the same on `Reader`): reads that
   take a scope and a filter, and refuse a file outside them as not in the index, so the
   rules that limit a caller's searches also limit what the caller reads.
+- `FileUpsert::media_type` names a file's format, which chooses its extractor ahead of the
+  key's extension, so files without an extension, or with a misleading one, can be indexed.
+  Extractors name the media types they read with `Extractor::media_types`, and the built-in
+  ones name theirs. Changing a file's media type indexes it again.
+- Attributes can be numbers (`AttributeValue::Number`) and times (`AttributeValue::Time`,
+  a `Timestamp`) as well as strings. `Filter::numbers` and `Filter::times` keep files whose
+  attribute is within a range, and `Filter::modified` keeps files modified within a range.
+  The file table records each file's modified time from the listing or a HEAD, or from
+  `FileUpsert::modified`.
+- `Bm25::stemmed(Language)` builds a keyword index that reduces words to their stems in one
+  of 18 languages, so a search for `refund` also finds `refunds` and `refunded`. Its kind,
+  such as `bm25-stem-en`, names the language, so a plug-in searches only the segments built
+  the same way. `Bm25::new` does not stem, as before.
+- Keyword search matches a file's name: its display name and the last part of its key
+  without the extension, on the first chunk of the file and with half the weight of the
+  text. Words in quotes still match only the text. A display name changed through
+  `FileChange::Attributes` is matched once the file is indexed again, for example after a
+  retry.
 
 ### Changed
 
+- The file table format changed, so indexes built by 0.1 must be built again.
+- `Filter::matches` also takes the file's modified time.
+- `Extractors::for_file` replaces `Extractors::for_key` and takes the file's media type.
 - A PDF that the decoded-bytes check cannot load fails as malformed, even where the parser
   could have repaired it.
 - A search whose scope names a prefix outside the data location fails with

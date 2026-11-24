@@ -92,6 +92,11 @@ let engine = Engine::builder(data, metadata)
 An extractor added for an extension replaces any built-in one for that extension, so you can
 also wrap a built-in extractor, for example to send PDFs without text to an OCR service.
 
+An extractor can also name the media types it reads, such as `text/x-log`, by implementing
+`media_types`. A host that knows a file's type passes it with `FileUpsert::media_type`, and
+the extractor that reads that type is chosen ahead of the key's extension. Without a media
+type, or with one no extractor reads, the extension decides.
+
 Things to get right:
 
 - **The profile id** is recorded with every segment the extractor builds. Change it (for

@@ -9,6 +9,11 @@ use serde_json::Deserializer;
 use crate::node::Node;
 
 const JSON_EXTENSIONS: [&str; 3] = ["json", "jsonl", "ndjson"];
+const JSON_MEDIA_TYPES: [&str; 3] = [
+    "application/json",
+    "application/jsonl",
+    "application/x-ndjson",
+];
 const BYTE_ORDER_MARK: &[u8] = b"\xEF\xBB\xBF";
 
 /// Extracts JSON in UTF-8, and JSON Lines: a file holding several values is read as an array
@@ -42,6 +47,10 @@ impl Extractor for Json {
 
     fn extensions(&self) -> &[&str] {
         &JSON_EXTENSIONS
+    }
+
+    fn media_types(&self) -> &[&str] {
+        &JSON_MEDIA_TYPES
     }
 
     fn extract(&self, file: &[u8], limits: &ExtractLimits) -> Result<Extraction, ExtractFailure> {

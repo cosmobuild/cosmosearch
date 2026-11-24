@@ -29,6 +29,7 @@ If the index is lost or damaged, you delete it and build it again from the files
 ## Features
 
 - Keyword search everywhere, vector search where it pays off, merged and optionally reranked.
+  Keyword search can stem words in one of 18 languages, so `refund` also finds `refunds`.
 - Exact phrases on request: with `Query::with_exact_phrases`, text in double quotes, such as
   `"ERR_CONN_42"` or `"refund policy"`, must appear in keyword results.
 - Text, Markdown, HTML, CSV, JSON, Word (`.docx`) and PDF.
@@ -36,7 +37,9 @@ If the index is lost or damaged, you delete it and build it again from the files
   embedding API and `/rerank` API over HTTP.
 - Results that cite a file, a byte range or page, and the file version they were read from.
   Reading a result back fails if the file has changed since.
-- Search scopes (only these prefixes) and budgets (this many shards, this much time).
+- Search scopes (only these prefixes), filters on your own attributes (values, numbers and
+  times, by value or range) and on modified time, and budgets (this many shards, this much
+  time).
 - Safe concurrent writers: index updates are atomic commits, and two writers never
   overwrite each other.
 - Everything beyond the core is an optional feature, so you compile only what you use.

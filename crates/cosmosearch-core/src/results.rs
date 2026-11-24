@@ -55,13 +55,10 @@ impl SearchIdentity {
     /// Adds a filter, the same whatever order its conditions were given in.
     #[must_use]
     pub fn filter(mut self, filter: &Filter) -> Self {
-        let conditions = filter.sorted_conditions();
-        self = self.number(len(conditions.len()));
-        for (name, values) in conditions {
-            self = self.text(name).number(len(values.len()));
-            for value in values {
-                self = self.text(value);
-            }
+        let parts = filter.identity_parts();
+        self = self.number(len(parts.len()));
+        for part in parts {
+            self.part(&part);
         }
         self
     }

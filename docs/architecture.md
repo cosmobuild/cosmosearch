@@ -61,7 +61,7 @@ files produce new segments, and nothing is edited in place. A segment can hold:
 
 | File | Contents |
 | --- | --- |
-| `meta-<id>.parquet` | The file table: key, size, ETag, status, attributes |
+| `meta-<id>.parquet` | The file table: key, size, ETag, status, media type, modified time, attributes |
 | `chunks-<id>.parquet` | One record per chunk: where it is in its file, its headings, its hash |
 | `lex-<id>.bin` | The BM25 keyword index (tantivy's files bundled into one object) |
 | `ivf-<id>.bin` | The vector index: centroids, cluster table, binary and int8 vectors |
@@ -82,8 +82,13 @@ capability.
 | L2 | Vector index (IVF) | For shards that are promoted, by usage or on request |
 
 Keyword search covers everything because it is cheap and needs no model. New files are
-always indexed at L1, and vectors are added only by promotion, where they pay off. A shard
-can also be demoted, which drops its vector segments and leaves it searchable by keyword.
+always indexed at L1, and vectors are added only by promotion, where they pay off. BM25
+lower-cases words and can also reduce them to their stems in one of 18 languages
+(`Bm25::stemmed`). How words are made is part of the plug-in's kind, so segments built one
+way are never searched the other way. Changing it for an existing index is up to you: index
+the files again, for example with a retry for each, or their keyword segments are skipped.
+A shard can also be demoted, which drops its vector segments and leaves it searchable by
+keyword.
 
 **Why IVF.** Graph-based vector indexes like HNSW are fast in memory but need many
 dependent reads, one per hop, which is slow on object storage. IVF needs two rounds of
@@ -165,9 +170,13 @@ limit was hit, the parser failed, or no part could be read, such as a scanned PD
 **unsupported** (no extractor for the type, or no text). You can ask for any file's status
 and the reason. A transient read error leaves the file pending rather than failing it.
 
-Files can carry **attributes**: a display name and any string or list values you attach.
-cosmosearch stores them without interpreting them, and search can filter on them. Changing
-attributes rewrites only the file table, with no re-reading or re-embedding.
+Files can carry **attributes**: a display name and any values you attach, each a string, a
+list of strings, a number or a time. cosmosearch stores them as given, and search can filter
+on them. Changing attributes rewrites only the file table, with no re-reading or
+re-embedding. Keyword search also matches a file's display name and the last part of its
+key, with less weight than its text. It matches the display name the file had when it was
+last indexed; a retry indexes it again with the new one. The file table also records each
+file's media type, when you name one, and its modified time, from the store or from you.
 
 ## Indexing jobs
 
@@ -244,8 +253,9 @@ flowchart LR
    each result is keyed by everything that affects it, including each index plug-in's
    model and search settings (such as how many clusters IVF probes).
 2. **Prune.** A scope (a list of key prefixes) drops every shard it doesn't reach before
-   anything is read. Filters on attributes (a value, or any of several) then decide which
-   files each index may score. Pruning uses only the file table.
+   anything is read. Filters on attributes (a value, any of several, or a range of
+   numbers or times) and on the modified time then decide which files each index may score.
+   Pruning uses only the file table.
 3. **Search each index.** BM25 and the vector index run at the same time, each over the
    segments that hold allowed files, reading only the parts they need by range request.
    A query made with `with_exact_phrases` asks BM25 to read text in double quotes as a

@@ -1,4 +1,6 @@
-use cosmosearch_core::{Attributes, Filter, Level, SegmentEntry};
+use std::time::{Duration, SystemTime};
+
+use cosmosearch_core::{Attributes, Filter, Level, SegmentEntry, Timestamp};
 use cosmosearch_indexer::{AttributeChange, PublishOutcome};
 
 use super::*;
@@ -251,5 +253,65 @@ async fn a_filtered_out_file_that_would_rank_first_never_takes_a_place() {
     assert_eq!(
         f.keys_for("refund", &legal(), 2).await,
         ["docs/good.txt", "docs/fair.txt"]
+    );
+}
+
+#[tokio::test]
+async fn a_new_display_name_is_matched_once_the_file_is_indexed_again() {
+    let f = fixture(FileSource::HostNamed).await;
+    f.named_file("docs/a.txt", b"refund policy").await;
+    f.index_everything().await;
+    let before = f.file("docs/a.txt").await.unwrap();
+
+    let change = AttributeChange::new("docs/a.txt").display_name("Staff handbook");
+    assert_eq!(
+        f.send(vec![FileChange::Attributes(change)]).await,
+        [ChangeOutcome::Applied]
+    );
+    let after = f.file("docs/a.txt").await.unwrap();
+    assert_eq!(after.status(), FileStatus::Ready);
+    assert_eq!(after.content_version(), before.content_version());
+    assert_eq!(f.live_keys_for("refund").await, ["docs/a.txt"]);
+    assert_eq!(f.live_keys_for("handbook").await, Vec::<String>::new());
+
+    let retry = FileChange::Retry {
+        key: "docs/a.txt".to_owned(),
+        expected: None,
+    };
+    assert_eq!(f.send(vec![retry]).await, [ChangeOutcome::Applied]);
+    f.index_everything().await;
+    assert_eq!(f.live_keys_for("handbook").await, ["docs/a.txt"]);
+}
+
+#[tokio::test]
+async fn the_modified_time_comes_from_the_listing() {
+    let f = fixture(FileSource::Listing).await;
+    let written = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    f.store.set_time(written);
+    f.put("docs/a.txt", b"refund policy").await;
+    f.indexer.sync_listing().await.unwrap();
+    let modified = f.file("docs/a.txt").await.unwrap().modified();
+    assert_eq!(modified, Some(Timestamp::from(written)));
+}
+
+#[tokio::test]
+async fn a_host_modified_time_wins_over_the_store_and_given_fields_leave_it_unknown() {
+    let f = fixture(FileSource::HostNamed).await;
+    f.store
+        .set_time(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+    f.put("docs/a.txt", b"refund policy").await;
+    f.put("docs/b.txt", b"refund rules").await;
+    let host = Timestamp::from_millis(42);
+    f.send(vec![
+        FileChange::Upsert(FileUpsert::new("docs/a.txt").modified(host)),
+        add("docs/c.txt", "e1"),
+        FileChange::Upsert(FileUpsert::new("docs/b.txt")),
+    ])
+    .await;
+    assert_eq!(f.file("docs/a.txt").await.unwrap().modified(), Some(host));
+    assert_eq!(f.file("docs/c.txt").await.unwrap().modified(), None);
+    assert_eq!(
+        f.file("docs/b.txt").await.unwrap().modified(),
+        Some(Timestamp::from_millis(1_700_000_000_000))
     );
 }

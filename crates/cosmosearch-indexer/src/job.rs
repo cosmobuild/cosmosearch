@@ -4,8 +4,8 @@ use bytes::Bytes;
 use cosmosearch_chunk::{Extractors, extract_chunks};
 use cosmosearch_core::{
     BuiltBy, ByteRange, Chunk, ETag, ExtractFailure, ExtractLimits, ExtractorProfile, IndexId,
-    IndexKind, Level, LimitKind, Location, Manifest, ManifestVersion, ModelId, SegmentEntry,
-    SegmentFile, SegmentFileName, SegmentId, ShardId, SharedIndex, Usage,
+    IndexKind, Level, LimitKind, Location, Manifest, ManifestVersion, MediaType, ModelId,
+    SegmentEntry, SegmentFile, SegmentFileName, SegmentId, ShardId, SharedIndex, Usage,
 };
 use cosmosearch_format::{ChunkRecord, ChunkTable, FileEntry, FileReason, FileStatus, FileTable};
 use cosmosearch_store::{CommitOutcome, ObjectKey, new_commit_id};
@@ -17,6 +17,16 @@ use crate::{Applied, Error, Indexer, Result};
 
 const CHUNKS_PREFIX: &str = "chunks-";
 
+fn named_first(chunks: Vec<Chunk>, mut name: Option<String>) -> Vec<Chunk> {
+    chunks
+        .into_iter()
+        .map(|chunk| match name.take() {
+            Some(name) => chunk.with_name(Some(name)),
+            None => chunk,
+        })
+        .collect()
+}
+
 /// One file to extract, as it was when the job was planned. Attributes are never part of a job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileJob {
@@ -27,6 +37,8 @@ pub struct FileJob {
     size: u64,
     etag: ETag,
     content_version: ManifestVersion,
+    media_type: Option<MediaType>,
+    display_name: Option<String>,
 }
 
 impl FileJob {
@@ -39,6 +51,8 @@ impl FileJob {
             size: entry.size(),
             etag: entry.etag().clone(),
             content_version: entry.content_version(),
+            media_type: entry.media_type().cloned(),
+            display_name: entry.display_name().map(str::to_owned),
         }
     }
 
@@ -529,7 +543,7 @@ impl Indexer {
         limits: &ExtractLimits,
     ) -> Result<ExtractedFile> {
         self.check_index(&job.index_id)?;
-        let Some(extractor) = extractors.for_key(&job.key) else {
+        let Some(extractor) = extractors.for_file(&job.key, job.media_type.as_ref()) else {
             return Ok(ExtractedFile::failed(job, ExtractFailure::NoExtractor));
         };
         if job.size > limits.file_bytes() {
@@ -557,7 +571,7 @@ impl Indexer {
             (profile, Ok(found)) => ExtractOutcome::Chunks {
                 profile,
                 unread_parts: found.unread_parts(),
-                chunks: found.into_chunks(),
+                chunks: named_first(found.into_chunks(), job.display_name.clone()),
             },
             (_, Err(cosmosearch_chunk::Error::File(failure))) => ExtractOutcome::Failed(failure),
             (_, Err(err)) => return Err(err.into()),

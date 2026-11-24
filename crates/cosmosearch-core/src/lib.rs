@@ -29,6 +29,7 @@ mod ids;
 mod level;
 mod location;
 mod manifest;
+mod media;
 mod passages;
 mod plugin;
 mod refs;
@@ -39,10 +40,11 @@ mod scope;
 mod search;
 mod split;
 mod status;
+mod time;
 mod usage;
 mod version;
 
-pub use attributes::{AttributeValue, Attributes};
+pub use attributes::{AttributeValue, Attributes, Number};
 pub use budget::Budget;
 pub use cache::{Admission, CachedFile, Placement, SegmentCache, SharedCache};
 pub use chunk::{Chunk, ChunkHash, indexed_text};
@@ -72,6 +74,7 @@ pub use manifest::{
     BuiltBy, FileSource, IndexRecord, KeyRange, Manifest, ManifestObject, ManifestPointer,
     ManifestStub, SegmentEntry, SegmentFile, ShardEntry,
 };
+pub use media::MediaType;
 pub use passages::{PassageCache, SharedPassages};
 pub use plugin::{Extractor, Index, SharedExtractor, SharedIndex};
 pub use refs::{ByteRange, Locator, RowRange, SourceRef};
@@ -86,5 +89,6 @@ pub use search::{
 };
 pub use split::text_ranges;
 pub use status::Status;
+pub use time::Timestamp;
 pub use usage::Usage;
 pub use version::ManifestVersion;

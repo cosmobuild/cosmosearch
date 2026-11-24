@@ -6,6 +6,7 @@ use crate::Result;
 use crate::split::{Span, decode, lines_from, passages};
 
 const MARKDOWN_EXTENSIONS: [&str; 2] = ["md", "markdown"];
+const MARKDOWN_MEDIA_TYPES: [&str; 2] = ["text/markdown", "text/x-markdown"];
 const FRONT_MATTER_ENDS: [&str; 2] = ["---", "..."];
 const MAX_HEADING_LEVEL: usize = 6;
 const MAX_INDENT: usize = 3;
@@ -33,6 +34,10 @@ impl Extractor for Markdown {
 
     fn extensions(&self) -> &[&str] {
         &MARKDOWN_EXTENSIONS
+    }
+
+    fn media_types(&self) -> &[&str] {
+        &MARKDOWN_MEDIA_TYPES
     }
 
     fn extract(&self, file: &[u8], _: &ExtractLimits) -> Result<Extraction, ExtractFailure> {

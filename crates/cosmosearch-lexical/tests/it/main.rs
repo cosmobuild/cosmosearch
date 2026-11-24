@@ -18,11 +18,15 @@ use cosmosearch_core::{
     IndexError, IndexKind, Level, Location, Locator, Passage, Query, RowSet, SegmentEntry,
     SegmentFile, SegmentFileName, SegmentFiles, SegmentId, SegmentSource,
 };
-use cosmosearch_lexical::Bm25;
+use cosmosearch_lexical::{Bm25, Language};
 use cosmosearch_store::{CreateOutcome, IndexHandle, MemoryStore, MetadataStore};
 
 fn chunks(texts: &[&str]) -> Vec<Chunk> {
-    let location: Location = "s3://example-bucket/docs/a.txt".parse().unwrap();
+    chunks_of("docs/a.txt", texts)
+}
+
+fn chunks_of(key: &str, texts: &[&str]) -> Vec<Chunk> {
+    let location: Location = format!("s3://example-bucket/{key}").parse().unwrap();
     let etag = ETag::new("9f3a").unwrap();
     texts
         .iter()
@@ -54,10 +58,27 @@ fn plugin() -> Bm25 {
 }
 
 async fn store_segment(handle: &IndexHandle, id: &str, texts: &[&str]) -> SegmentEntry {
-    let bm25 = plugin();
+    store_segment_by(&plugin(), handle, id, texts).await
+}
+
+async fn store_segment_by(
+    bm25: &Bm25,
+    handle: &IndexHandle,
+    id: &str,
+    texts: &[&str],
+) -> SegmentEntry {
+    store_chunks(bm25, handle, id, &chunks(texts)).await
+}
+
+async fn store_chunks(
+    bm25: &Bm25,
+    handle: &IndexHandle,
+    id: &str,
+    chunks: &[Chunk],
+) -> SegmentEntry {
     let id = SegmentId::new(id).unwrap();
     let mut files = Vec::new();
-    for file in bm25.build(&id, &chunks(texts)).await.unwrap().into_files() {
+    for file in bm25.build(&id, chunks).await.unwrap().into_files() {
         let size = u64::try_from(file.body().len()).unwrap();
         let name = file.name().clone();
         handle
@@ -113,6 +134,24 @@ async fn search(
     limit: usize,
 ) -> Vec<Hit> {
     search_rows(handle, segments, &every_row(segments), text, limit).await
+}
+
+async fn search_query(
+    bm25: &Bm25,
+    handle: &IndexHandle,
+    segments: &[SegmentEntry],
+    query: Query,
+) -> Vec<Hit> {
+    bm25.search(
+        &SegmentSource::new(handle.clone()),
+        segments,
+        &every_row(segments),
+        &query,
+        10,
+    )
+    .await
+    .unwrap()
+    .into_hits()
 }
 
 async fn search_exact(
@@ -785,4 +824,67 @@ async fn a_damaged_segment_gives_an_error_or_hits_and_never_a_panic() {
             .search(&source, one, &every_row(one), &Query::new("refund fees"), 5)
             .await;
     }
+}
+
+#[tokio::test]
+async fn a_stemmed_index_matches_other_forms_of_a_word_and_plain_does_not() {
+    let handle = index().await;
+    let texts = ["refunds are issued", "the refunded order", "a policy"];
+    let english = Bm25::stemmed(Language::English).unwrap();
+    assert_eq!(english.kind().as_str(), "bm25-stem-en");
+    let stemmed = store_segment_by(&english, &handle, "s1", &texts).await;
+    let plain = store_segment(&handle, "s2", &texts).await;
+    let found = search_query(
+        &english,
+        &handle,
+        std::slice::from_ref(&stemmed),
+        Query::new("Refund"),
+    )
+    .await;
+    assert_eq!(rows(&found).len(), 2);
+    let phrase = Query::new("\"refund order\"").with_exact_phrases();
+    let found = search_query(&english, &handle, std::slice::from_ref(&stemmed), phrase).await;
+    assert_eq!(rows(&found), [1]);
+    let plain_found = search(&handle, std::slice::from_ref(&plain), "refund", 10).await;
+    assert_eq!(rows(&plain_found), Vec::<u64>::new());
+    let mixed = search_query(
+        &english,
+        &handle,
+        std::slice::from_ref(&plain),
+        Query::new("refunds"),
+    )
+    .await;
+    assert_eq!(rows(&mixed), Vec::<u64>::new());
+    assert_eq!(
+        search(&handle, &[stemmed, plain], "refunds", 10)
+            .await
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_file_name_matches_with_less_weight_on_its_first_chunk_only() {
+    let handle = index().await;
+    let mut chunks = chunks_of("docs/travel-policy.pdf", &["flights and hotels", "meals"]);
+    chunks.extend(
+        chunks_of("docs/b.txt", &["intro", "more"])
+            .into_iter()
+            .map(|chunk| chunk.with_name(Some("Staff Handbook".to_owned()))),
+    );
+    chunks.extend(chunks_of("docs/c.txt", &["the handbook says"]));
+    let segment = store_chunks(&plugin(), &handle, "s1", &chunks).await;
+    let segments = std::slice::from_ref(&segment);
+    assert_eq!(rows(&search(&handle, segments, "travel", 10).await), [0]);
+    assert_eq!(rows(&search(&handle, segments, "policy", 10).await), [0]);
+    assert_eq!(
+        rows(&search(&handle, segments, "pdf", 10).await),
+        Vec::<u64>::new()
+    );
+    assert_eq!(
+        rows(&search(&handle, segments, "handbook", 10).await),
+        [4, 2]
+    );
+    let exact = search_exact(&handle, segments, "\"staff handbook\"", 10).await;
+    assert_eq!(rows(&exact), Vec::<u64>::new());
 }

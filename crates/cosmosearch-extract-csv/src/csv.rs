@@ -7,6 +7,7 @@ use cosmosearch_core::{
 use csv::{ReaderBuilder, StringRecord};
 
 const CSV_EXTENSIONS: [&str; 1] = ["csv"];
+const CSV_MEDIA_TYPES: [&str; 1] = ["text/csv"];
 const BYTE_ORDER_MARK: &[u8] = b"\xEF\xBB\xBF";
 const ROW_SEPARATOR: &str = "\n\n";
 
@@ -36,6 +37,10 @@ impl Extractor for Csv {
 
     fn extensions(&self) -> &[&str] {
         &CSV_EXTENSIONS
+    }
+
+    fn media_types(&self) -> &[&str] {
+        &CSV_MEDIA_TYPES
     }
 
     fn extract(&self, file: &[u8], limits: &ExtractLimits) -> Result<Extraction, ExtractFailure> {

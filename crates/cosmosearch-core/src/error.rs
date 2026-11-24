@@ -44,6 +44,10 @@ pub enum Error {
     #[error("invalid ETag `{0}`")]
     InvalidETag(String),
 
+    /// A media type is not a type and a subtype joined by `/`.
+    #[error("invalid media type `{0}`")]
+    InvalidMediaType(String),
+
     /// An id is not a valid path segment.
     #[error("invalid {kind} `{value}`: {reason}")]
     InvalidId {

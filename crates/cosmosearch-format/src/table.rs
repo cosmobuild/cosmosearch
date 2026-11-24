@@ -2,17 +2,17 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use arrow_array::{Array, ArrayRef, StringArray, UInt32Array, UInt64Array};
+use arrow_array::{Array, ArrayRef, Int64Array, StringArray, UInt32Array, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
 use bytes::Bytes;
-use cosmosearch_core::{Attributes, ETag, ExtractFailure, ManifestVersion};
+use cosmosearch_core::{Attributes, ETag, ExtractFailure, ManifestVersion, MediaType, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{EncodingError, malformed};
 use crate::stored::{self, optional, required};
 use crate::{Error, Result};
 
-const FORMAT: u32 = 2;
+const FORMAT: u32 = 3;
 const NEXT_ORDINAL: &str = "cosmosearch.next_ordinal";
 
 const ORDINAL: &str = "ordinal";
@@ -23,6 +23,8 @@ const CONTENT_VERSION: &str = "content_version";
 const STATUS: &str = "status";
 const REASON: &str = "reason";
 const DISPLAY_NAME: &str = "display_name";
+const MEDIA_TYPE: &str = "media_type";
+const MODIFIED: &str = "modified";
 const ATTRIBUTES: &str = "attributes";
 const UNREAD_PARTS: &str = "unread_parts";
 
@@ -101,6 +103,8 @@ pub struct FileEntry {
     status: FileStatus,
     reason: Option<FileReason>,
     display_name: Option<String>,
+    media_type: Option<MediaType>,
+    modified: Option<Timestamp>,
     attributes: Attributes,
     unread_parts: u32,
 }
@@ -122,6 +126,8 @@ impl FileEntry {
             status: FileStatus::Pending,
             reason: None,
             display_name: None,
+            media_type: None,
+            modified: None,
             attributes: Attributes::new(),
             unread_parts: 0,
         }
@@ -131,6 +137,20 @@ impl FileEntry {
     #[must_use]
     pub fn with_display_name(mut self, name: Option<String>) -> Self {
         self.display_name = name;
+        self
+    }
+
+    /// Sets the media type a host named for this file.
+    #[must_use]
+    pub fn with_media_type(mut self, media_type: Option<MediaType>) -> Self {
+        self.media_type = media_type;
+        self
+    }
+
+    /// Sets when the recorded version of the file was last modified.
+    #[must_use]
+    pub fn with_modified(mut self, modified: Option<Timestamp>) -> Self {
+        self.modified = modified;
         self
     }
 
@@ -179,6 +199,18 @@ impl FileEntry {
     /// The name a host shows for this file.
     pub fn display_name(&self) -> Option<&str> {
         self.display_name.as_deref()
+    }
+
+    /// The media type a host named for this file, which chooses its extractor ahead of the
+    /// key's extension.
+    pub fn media_type(&self) -> Option<&MediaType> {
+        self.media_type.as_ref()
+    }
+
+    /// When the recorded version of the file was last modified, as the store or the host
+    /// reported it.
+    pub fn modified(&self) -> Option<Timestamp> {
+        self.modified
     }
 
     /// The file's attributes.
@@ -358,6 +390,10 @@ impl FileTable {
             .iter()
             .map(|file| file.display_name.as_deref())
             .collect();
+        let media_types: Vec<Option<&str>> = files
+            .iter()
+            .map(|file| file.media_type.as_ref().map(MediaType::as_str))
+            .collect();
         let columns: Vec<ArrayRef> = vec![
             Arc::new(UInt64Array::from_iter_values(
                 files.iter().map(|f| f.ordinal),
@@ -375,6 +411,13 @@ impl FileTable {
             )),
             Arc::new(StringArray::from(reasons)),
             Arc::new(StringArray::from(display_names)),
+            Arc::new(StringArray::from(media_types)),
+            Arc::new(Int64Array::from(
+                files
+                    .iter()
+                    .map(|f| f.modified.map(Timestamp::millis))
+                    .collect::<Vec<_>>(),
+            )),
             Arc::new(StringArray::from_iter_values(attributes)),
             Arc::new(UInt32Array::from_iter_values(
                 files.iter().map(|f| f.unread_parts),
@@ -414,6 +457,8 @@ impl FileTable {
             let statuses = required::<StringArray>(batch, STATUS)?;
             let reasons = optional::<StringArray>(batch, REASON)?;
             let names = optional::<StringArray>(batch, DISPLAY_NAME)?;
+            let media_types = optional::<StringArray>(batch, MEDIA_TYPE)?;
+            let modified = optional::<Int64Array>(batch, MODIFIED)?;
             let attributes = required::<StringArray>(batch, ATTRIBUTES)?;
             let unread = required::<UInt32Array>(batch, UNREAD_PARTS)?;
             for row in 0..batch.num_rows() {
@@ -446,6 +491,13 @@ impl FileTable {
                     status,
                     reason,
                     display_name: (!names.is_null(row)).then(|| names.value(row).to_owned()),
+                    media_type: if media_types.is_null(row) {
+                        None
+                    } else {
+                        Some(MediaType::new(media_types.value(row))?)
+                    },
+                    modified: (!modified.is_null(row))
+                        .then(|| Timestamp::from_millis(modified.value(row))),
                     attributes,
                     unread_parts,
                 })?;
@@ -481,6 +533,8 @@ fn schema() -> Schema {
         Field::new(STATUS, DataType::Utf8, false),
         Field::new(REASON, DataType::Utf8, true),
         Field::new(DISPLAY_NAME, DataType::Utf8, true),
+        Field::new(MEDIA_TYPE, DataType::Utf8, true),
+        Field::new(MODIFIED, DataType::Int64, true),
         Field::new(ATTRIBUTES, DataType::Utf8, false),
         Field::new(UNREAD_PARTS, DataType::UInt32, false),
     ])
@@ -490,7 +544,7 @@ fn schema() -> Schema {
 mod tests {
     use proptest::prelude::*;
 
-    use cosmosearch_core::{AttributeValue, LimitKind};
+    use cosmosearch_core::{AttributeValue, LimitKind, Number};
 
     use super::*;
 
@@ -508,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn a_table_round_trips_with_names_and_attributes() {
+    fn a_table_round_trips_with_names_media_types_and_attributes() {
         let mut table = FileTable::new();
         let attributes = Attributes::from([
             ("owner".to_owned(), AttributeValue::One("legal".to_owned())),
@@ -520,6 +574,8 @@ mod tests {
         table.insert(
             entry("docs/a.txt")
                 .with_display_name(Some("Contract A".to_owned()))
+                .with_media_type(Some(MediaType::new("text/markdown").unwrap()))
+                .with_modified(Some(Timestamp::from_millis(1_700_000_000_000)))
                 .with_attributes(attributes),
         );
         table.insert(entry("docs/b.txt"));
@@ -737,6 +793,8 @@ mod tests {
                 "status:Utf8",
                 "reason:Utf8",
                 "display_name:Utf8",
+                "media_type:Utf8",
+                "modified:Int64",
                 "attributes:Utf8",
                 "unread_parts:UInt32",
             ]
@@ -763,6 +821,8 @@ mod tests {
             Arc::new(StringArray::from_iter_values(Vec::<String>::new())),
             Arc::new(StringArray::from(Vec::<Option<&str>>::new())),
             Arc::new(StringArray::from(Vec::<Option<&str>>::new())),
+            Arc::new(StringArray::from(Vec::<Option<&str>>::new())),
+            Arc::new(Int64Array::from(Vec::<Option<i64>>::new())),
             Arc::new(StringArray::from_iter_values(Vec::<String>::new())),
             Arc::new(UInt32Array::from_iter_values([])),
         ]
@@ -772,7 +832,16 @@ mod tests {
     fn damaged_bytes_give_an_error_and_never_a_panic() {
         FileTable::decode(Bytes::from_static(b"garbage")).unwrap_err();
         let mut table = FileTable::new();
-        table.insert(entry("docs/a.txt").with_display_name(Some("name".to_owned())));
+        table.insert(
+            entry("docs/a.txt")
+                .with_display_name(Some("name".to_owned()))
+                .with_media_type(Some(MediaType::new("text/plain").unwrap()))
+                .with_modified(Some(Timestamp::from_millis(-3)))
+                .with_attributes(Attributes::from([(
+                    "amount".to_owned(),
+                    AttributeValue::Number(Number::new(2.5).unwrap()),
+                )])),
+        );
         let good = table.encode().unwrap();
         FileTable::decode(Bytes::copy_from_slice(&good[..good.len() / 2])).unwrap_err();
         for at in 0..good.len() {
@@ -782,18 +851,68 @@ mod tests {
         }
     }
 
+    fn attribute_value() -> impl Strategy<Value = AttributeValue> {
+        prop_oneof![
+            ".{0,8}".prop_map(AttributeValue::One),
+            prop::collection::vec(".{0,8}", 0..3).prop_map(AttributeValue::Many),
+            any::<f64>()
+                .prop_filter_map("finite", Number::new)
+                .prop_map(AttributeValue::Number),
+            any::<i64>().prop_map(|millis| AttributeValue::Time(Timestamp::from_millis(millis))),
+        ]
+    }
+
+    #[test]
+    fn a_stored_media_type_that_is_not_valid_is_an_error() {
+        let mut columns = empty_columns();
+        let one = |values: Vec<Option<&str>>| -> ArrayRef { Arc::new(StringArray::from(values)) };
+        columns[0] = Arc::new(UInt64Array::from_iter_values([0]));
+        columns[1] = Arc::new(StringArray::from_iter_values(["docs/a.txt"]));
+        columns[2] = Arc::new(UInt64Array::from_iter_values([5]));
+        columns[3] = Arc::new(StringArray::from_iter_values(["9f3a"]));
+        columns[4] = Arc::new(UInt64Array::from_iter_values([3]));
+        columns[5] = Arc::new(StringArray::from_iter_values(["pending"]));
+        columns[6] = one(vec![None]);
+        columns[7] = one(vec![None]);
+        columns[8] = one(vec![Some("not a media type")]);
+        columns[9] = Arc::new(Int64Array::from(vec![None::<i64>]));
+        columns[10] = Arc::new(StringArray::from_iter_values(["{}"]));
+        columns[11] = Arc::new(UInt32Array::from_iter_values([0]));
+        let metadata = vec![(NEXT_ORDINAL, "1".to_owned())];
+        let bytes = stored::write(schema(), columns, FORMAT, metadata).unwrap();
+        let err = FileTable::decode(Bytes::from(bytes)).unwrap_err();
+        assert!(matches!(err, Error::Core(_)), "{err}");
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(32))]
 
         #[test]
         fn any_table_round_trips(
-            files in prop::collection::btree_map("[a-z/é]{1,20}", (any::<u64>(), "[a-f0-9]{1,16}", prop::option::of(".{0,12}")), 0..40),
+            files in prop::collection::btree_map(
+                "[a-z/é]{1,20}",
+                (
+                    any::<u64>(),
+                    "[a-f0-9]{1,16}",
+                    prop::option::of(".{0,12}"),
+                    prop::option::of("[a-z]{1,8}/[a-z0-9.+-]{1,12}"),
+                    prop::option::of(any::<i64>()),
+                    prop::collection::btree_map("[a-z]{1,6}", attribute_value(), 0..4),
+                ),
+                0..40,
+            ),
         ) {
             let mut table = FileTable::new();
-            for (key, (size, tag, name)) in files {
+            for (key, (size, tag, name, media_type, modified, attributes)) in files {
                 let etag = ETag::new(tag).unwrap();
                 let version = ManifestVersion::new(7).unwrap();
-                table.insert(FileEntry::pending(key, size, etag, version).with_display_name(name));
+                table.insert(
+                    FileEntry::pending(key, size, etag, version)
+                        .with_display_name(name)
+                        .with_media_type(media_type.map(|value| MediaType::new(value).unwrap()))
+                        .with_modified(modified.map(Timestamp::from_millis))
+                        .with_attributes(attributes),
+                );
             }
             prop_assert_eq!(round_trip(&table), table);
         }

@@ -1,4 +1,4 @@
-use cosmosearch_core::{AttributeValue, Attributes, ETag, ManifestVersion};
+use cosmosearch_core::{AttributeValue, Attributes, ETag, ManifestVersion, MediaType, Timestamp};
 
 /// A file's size and ETag, when the host already knows them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +20,8 @@ pub struct FileUpsert {
     pub(crate) key: String,
     pub(crate) fields: Option<StoreFields>,
     pub(crate) display_name: Option<String>,
+    pub(crate) media_type: Option<MediaType>,
+    pub(crate) modified: Option<Timestamp>,
     pub(crate) attributes: Attributes,
     pub(crate) expected: Option<ManifestVersion>,
 }
@@ -35,6 +37,8 @@ impl FileUpsert {
             key: key.into(),
             fields: None,
             display_name: None,
+            media_type: None,
+            modified: None,
             attributes: Attributes::new(),
             expected: None,
         }
@@ -47,10 +51,31 @@ impl FileUpsert {
         self
     }
 
-    /// Sets the name to show for this file.
+    /// Sets the name to show for this file. Keyword search matches the name the file had
+    /// when it was last indexed.
     #[must_use]
     pub fn display_name(mut self, name: impl Into<String>) -> Self {
         self.display_name = Some(name.into());
+        self
+    }
+
+    /// Names the file's format, which chooses its extractor ahead of the key's extension. A
+    /// media type no registered extractor reads falls back to the extension. Changing it
+    /// indexes the file again.
+    #[must_use]
+    pub fn media_type(mut self, media_type: MediaType) -> Self {
+        self.media_type = Some(media_type);
+        self
+    }
+
+    /// Sets when this version of the file was last modified, which [`Filter::modified`]
+    /// checks. Without it, the time comes from the store when the file is read with a HEAD,
+    /// and is not known when [`FileUpsert::fields`] supplies the size and ETag.
+    ///
+    /// [`Filter::modified`]: cosmosearch_core::Filter::modified
+    #[must_use]
+    pub fn modified(mut self, modified: Timestamp) -> Self {
+        self.modified = Some(modified);
         self
     }
 
@@ -69,8 +94,12 @@ impl FileUpsert {
     }
 }
 
-/// New attributes and display name for a file already in the index. The file is not read
-/// again and keeps its content version and status.
+/// New attributes and display name for a file already in the index.
+///
+/// They replace what the index holds, so a display name left out is removed. The file is not
+/// read again and keeps its content version and status. Keyword search matches the display
+/// name the file had when it was last indexed, until its content changes or
+/// [`FileChange::Retry`] indexes it again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttributeChange {
     pub(crate) key: String,
@@ -91,7 +120,8 @@ impl AttributeChange {
         }
     }
 
-    /// Sets the name to show for this file.
+    /// Sets the name to show for this file. Keyword search matches the name the file had
+    /// when it was last indexed.
     #[must_use]
     pub fn display_name(mut self, name: impl Into<String>) -> Self {
         self.display_name = Some(name.into());

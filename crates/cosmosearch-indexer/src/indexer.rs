@@ -3,8 +3,8 @@ use std::num::NonZeroU64;
 
 use bytes::Bytes;
 use cosmosearch_core::{
-    Attributes, BuiltBy, ETag, FileSource, KeyRange, Level, Manifest, ManifestVersion,
-    SegmentEntry, SegmentFile, SegmentFileName, SegmentId, ShardEntry, ShardId,
+    Attributes, BuiltBy, ETag, FileSource, KeyRange, Level, Manifest, ManifestVersion, MediaType,
+    SegmentEntry, SegmentFile, SegmentFileName, SegmentId, ShardEntry, ShardId, Timestamp,
 };
 use cosmosearch_format::{FileEntry, FileReason, FileStatus, FileTable};
 use cosmosearch_store::{CommitOutcome, DataStore, IndexHandle, ObjectKey, new_commit_id};
@@ -56,6 +56,8 @@ struct Incoming {
     size: u64,
     etag: ETag,
     display_name: Option<String>,
+    media_type: Option<MediaType>,
+    modified: Option<Timestamp>,
     attributes: Attributes,
     expected: Expected,
 }
@@ -171,13 +173,17 @@ impl Indexer {
     pub async fn sync_listing(&self) -> Result<Applied> {
         self.require(FileSource::Listing).await?;
         let known = self.entries().await?;
-        let listed: BTreeMap<String, (u64, ETag)> = self
+        let listed: BTreeMap<String, (u64, ETag, Option<Timestamp>)> = self
             .data
             .list()
             .map_ok(|info| {
                 (
                     info.key().as_str().to_owned(),
-                    (info.size(), info.etag().clone()),
+                    (
+                        info.size(),
+                        info.etag().clone(),
+                        info.last_modified().map(Timestamp::from),
+                    ),
                 )
             })
             .try_collect()
@@ -192,7 +198,7 @@ impl Indexer {
             }
         }
         let known: BTreeMap<&str, &FileEntry> = known.iter().map(|e| (e.key(), e)).collect();
-        for (key, (size, etag)) in listed {
+        for (key, (size, etag, modified)) in listed {
             let expected = match known.get(key.as_str()) {
                 Some(entry) if entry.etag() == &etag => continue,
                 Some(entry) => Expected::At(entry.content_version()),
@@ -203,6 +209,8 @@ impl Indexer {
                 size,
                 etag,
                 display_name: None,
+                media_type: None,
+                modified,
                 attributes: Attributes::new(),
                 expected,
             }));
@@ -300,11 +308,15 @@ impl Indexer {
 
     async fn resolve_upsert(&self, upsert: FileUpsert) -> Result<Step> {
         let object = self.check_key(&upsert.key)?;
-        let (size, etag) = if let Some(fields) = upsert.fields {
-            (fields.size, fields.etag)
+        let (size, etag, modified) = if let Some(fields) = upsert.fields {
+            (fields.size, fields.etag, None)
         } else {
             match self.data.head(&object).await {
-                Ok(info) => (info.size(), info.etag().clone()),
+                Ok(info) => (
+                    info.size(),
+                    info.etag().clone(),
+                    info.last_modified().map(Timestamp::from),
+                ),
                 Err(cosmosearch_store::Error::NotFound { .. }) => return Ok(Step::Missing),
                 Err(err) => return Err(err.into()),
             }
@@ -314,6 +326,8 @@ impl Indexer {
             size,
             etag,
             display_name: upsert.display_name,
+            media_type: upsert.media_type,
+            modified: upsert.modified.or(modified),
             attributes: upsert.attributes,
             expected: upsert.expected.into(),
         }))
@@ -589,7 +603,9 @@ fn apply_upsert(
     version: ManifestVersion,
 ) -> ChangeOutcome {
     let current = table.get(&incoming.key);
-    let same = current.is_some_and(|entry| entry.etag() == &incoming.etag);
+    let same = current.is_some_and(|entry| {
+        entry.etag() == &incoming.etag && entry.media_type() == incoming.media_type.as_ref()
+    });
     let moved = match incoming.expected {
         Expected::Any => false,
         Expected::At(version) => moved_on(table, &incoming.key, Some(version)),
@@ -608,6 +624,8 @@ fn apply_upsert(
         version,
     )
     .with_display_name(incoming.display_name.clone())
+    .with_media_type(incoming.media_type.clone())
+    .with_modified(incoming.modified)
     .with_attributes(incoming.attributes.clone());
     table.insert(entry);
     ChangeOutcome::Applied

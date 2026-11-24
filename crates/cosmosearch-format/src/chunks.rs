@@ -199,7 +199,7 @@ impl ChunkTable {
             let passes = files.by_ordinal(span.file_ordinal).is_some_and(|file| {
                 file.content_version() == span.content_version
                     && scope.contains(file.key())
-                    && filter.matches(file.attributes())
+                    && filter.matches(file.attributes(), file.modified())
             });
             if passes {
                 rows.insert(as_u64(span.rows.start)..as_u64(span.rows.end));
@@ -538,7 +538,7 @@ mod tests {
             let passes = files.by_ordinal(record.file_ordinal).is_some_and(|file| {
                 file.content_version() == record.content_version
                     && scope.contains(file.key())
-                    && filter.matches(file.attributes())
+                    && filter.matches(file.attributes(), file.modified())
             });
             if passes {
                 rows.insert(as_u64(row)..as_u64(row) + 1);

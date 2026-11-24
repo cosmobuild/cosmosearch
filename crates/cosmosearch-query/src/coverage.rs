@@ -19,7 +19,7 @@ impl Counts {
     pub(crate) fn of(table: &FileTable, scope: &Scope, filter: &Filter) -> Self {
         let mut counts = Counts::default();
         for file in table.iter() {
-            if scope.contains(file.key()) && filter.matches(file.attributes()) {
+            if scope.contains(file.key()) && filter.matches(file.attributes(), file.modified()) {
                 counts.count(file);
             }
         }

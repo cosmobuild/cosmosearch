@@ -17,9 +17,9 @@ use cosmosearch_chunk::Extractors;
 use cosmosearch_core::{
     AllowedRows, AttributeValue, Built, BuiltBy, ByteRange, Chunk, ETag, ExtractFailure,
     ExtractLimits, Extraction, Extractor, ExtractorProfile, FileSource, Filter, HeatSink, Hit,
-    Hits, Index, IndexError, IndexKind, KeyRange, Level, Locator, Passage, Query, Scope,
+    Hits, Index, IndexError, IndexKind, KeyRange, Level, Locator, Number, Passage, Query, Scope,
     SegmentEntry, SegmentFile, SegmentFileName, SegmentId, SegmentSource, ShardEntry, ShardId,
-    SharedExtractor, SharedHeat, SharedIndex, Signal, SourceRef, Usage,
+    SharedExtractor, SharedHeat, SharedIndex, Signal, SourceRef, Timestamp, Usage,
 };
 use cosmosearch_extract_html::Html;
 use cosmosearch_indexer::{
@@ -659,6 +659,70 @@ async fn filters_apply_before_ranking() {
         .await;
     let keys: Vec<&str> = hits.iter().map(|h| h.source().location().key()).collect();
     assert_eq!(keys, ["docs/b.txt"]);
+}
+
+#[tokio::test]
+async fn ranges_filter_on_numbers_times_and_the_modified_time() {
+    let f = Fixture::new().await;
+    let old = Timestamp::from_millis(1_000);
+    let amount = |value| AttributeValue::Number(Number::new(value).unwrap());
+    let files: [(&str, &[u8]); 3] = [
+        ("docs/a.txt", b"refund policy"),
+        ("docs/b.txt", b"refund rules"),
+        ("docs/c.txt", b"refund terms"),
+    ];
+    for (key, body) in files {
+        f.put(key, body).await;
+    }
+    f.indexer
+        .apply(vec![
+            FileChange::Upsert(FileUpsert::new("docs/a.txt").attribute("amount", amount(150.0))),
+            FileChange::Upsert(
+                FileUpsert::new("docs/b.txt")
+                    .attribute("amount", amount(900.0))
+                    .attribute("signed", AttributeValue::Time(old)),
+            ),
+            FileChange::Upsert(
+                FileUpsert::new("docs/c.txt").modified(Timestamp::from_millis(5_000)),
+            ),
+        ])
+        .await
+        .unwrap();
+    f.index(&[]).await;
+    let keys = |hits: Vec<SearchHit>| -> Vec<String> {
+        let mut keys: Vec<String> = hits
+            .iter()
+            .map(|h| h.source().location().key().to_owned())
+            .collect();
+        keys.sort();
+        keys
+    };
+    let cases = [
+        (
+            Filter::new().numbers("amount", 100.0..=200.0),
+            vec!["docs/a.txt"],
+        ),
+        (
+            Filter::new().numbers("amount", 100.0..),
+            vec!["docs/a.txt", "docs/b.txt"],
+        ),
+        (Filter::new().times("signed", ..=old), vec!["docs/b.txt"]),
+        (
+            Filter::new().modified(Timestamp::from_millis(2_000)..),
+            vec!["docs/c.txt"],
+        ),
+        (
+            Filter::new().modified(..Timestamp::from_millis(2_000)),
+            vec!["docs/a.txt", "docs/b.txt"],
+        ),
+    ];
+    for (filter, expected) in cases {
+        assert_eq!(
+            keys(f.search_with("refund", &filter).await),
+            expected,
+            "{filter:?}"
+        );
+    }
 }
 
 #[tokio::test]
