@@ -85,9 +85,10 @@ Keyword search covers everything because it is cheap and needs no model. New fil
 always indexed at L1, and vectors are added only by promotion, where they pay off. BM25
 lower-cases words and can also reduce them to their stems in one of 18 languages
 (`Bm25::stemmed`). How words are made is part of the plug-in's kind, so segments built one
-way are never searched the other way, and changing it means building the keyword segments
-again. A shard
-can also be demoted, which drops its vector segments and leaves it searchable by keyword.
+way are never searched the other way. Changing it for an existing index is up to you: index
+the files again, for example with a retry for each, or their keyword segments are skipped.
+A shard can also be demoted, which drops its vector segments and leaves it searchable by
+keyword.
 
 **Why IVF.** Graph-based vector indexes like HNSW are fast in memory but need many
 dependent reads, one per hop, which is slow on object storage. IVF needs two rounds of
@@ -173,8 +174,9 @@ Files can carry **attributes**: a display name and any values you attach, each a
 list of strings, a number or a time. cosmosearch stores them as given, and search can filter
 on them. Changing attributes rewrites only the file table, with no re-reading or
 re-embedding. Keyword search also matches a file's display name and the last part of its
-key, with less weight than its text, so a new display name indexes the file again. The file table also records each file's media type, when you name one, and
-its modified time, from the store or from you.
+key, with less weight than its text, so a new display name indexes the file again. The
+file table also records each file's media type, when you name one, and its modified time,
+from the store or from you.
 
 ## Indexing jobs
 
@@ -252,7 +254,8 @@ flowchart LR
    model and search settings (such as how many clusters IVF probes).
 2. **Prune.** A scope (a list of key prefixes) drops every shard it doesn't reach before
    anything is read. Filters on attributes (a value, any of several, or a range of
-   numbers or times) and on the modified time then decide which files each index may score. Pruning uses only the file table.
+   numbers or times) and on the modified time then decide which files each index may score.
+   Pruning uses only the file table.
 3. **Search each index.** BM25 and the vector index run at the same time, each over the
    segments that hold allowed files, reading only the parts they need by range request.
    A query made with `with_exact_phrases` asks BM25 to read text in double quotes as a

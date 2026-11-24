@@ -36,6 +36,7 @@ All notable changes are listed here. The format follows
 
 - The file table format changed, so indexes built by 0.1 must be built again.
 - `Filter::matches` also takes the file's modified time.
+- `Extractors::for_file` replaces `Extractors::for_key` and takes the file's media type.
 - A new display name, through `FileChange::Attributes`, makes the file wait for a job
   again, because keyword search reads it. New attributes alone still change only the file
   table.

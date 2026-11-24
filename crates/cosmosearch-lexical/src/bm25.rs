@@ -149,7 +149,8 @@ fn names(chunks: &[Chunk]) -> Vec<Option<String>> {
 /// Words are split on what is not a letter or digit and lower-cased. [`Bm25::stemmed`] also
 /// reduces them to their stems in one language. How words are made is part of the plug-in's
 /// kind, `bm25` or `bm25-stem-<code>`, so a plug-in searches only the segments built the
-/// same way, and an index changing it builds its keyword segments again.
+/// same way. Segments of another kind are skipped, so a host that changes how an existing
+/// index makes words indexes its files again, for example with `FileChange::Retry`.
 #[derive(Debug, Clone)]
 pub struct Bm25 {
     kind: IndexKind,

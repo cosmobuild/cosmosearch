@@ -17,6 +17,16 @@ use crate::{Applied, Error, Indexer, Result};
 
 const CHUNKS_PREFIX: &str = "chunks-";
 
+fn named_first(chunks: Vec<Chunk>, mut name: Option<String>) -> Vec<Chunk> {
+    chunks
+        .into_iter()
+        .map(|chunk| match name.take() {
+            Some(name) => chunk.with_name(Some(name)),
+            None => chunk,
+        })
+        .collect()
+}
+
 /// One file to extract, as it was when the job was planned. Attributes are never part of a job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileJob {
@@ -561,11 +571,7 @@ impl Indexer {
             (profile, Ok(found)) => ExtractOutcome::Chunks {
                 profile,
                 unread_parts: found.unread_parts(),
-                chunks: found
-                    .into_chunks()
-                    .into_iter()
-                    .map(|chunk| chunk.with_name(job.display_name.clone()))
-                    .collect(),
+                chunks: named_first(found.into_chunks(), job.display_name.clone()),
             },
             (_, Err(cosmosearch_chunk::Error::File(failure))) => ExtractOutcome::Failed(failure),
             (_, Err(err)) => return Err(err.into()),

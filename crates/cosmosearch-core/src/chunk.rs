@@ -101,14 +101,15 @@ impl Chunk {
     }
 
     /// Sets the name a host shows for the chunk's file, which keyword search can match beside
-    /// the file's key. It is not part of the hash.
+    /// the file's key. The indexer sets it on the first chunk of each file only. It is not
+    /// part of the hash.
     #[must_use]
     pub fn with_name(mut self, name: Option<String>) -> Self {
         self.name = name;
         self
     }
 
-    /// The name a host shows for the chunk's file, when the indexer set one.
+    /// The name a host shows for the chunk's file, when the indexer set one on this chunk.
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
     }

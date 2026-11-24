@@ -544,7 +544,7 @@ fn schema() -> Schema {
 mod tests {
     use proptest::prelude::*;
 
-    use cosmosearch_core::{AttributeValue, LimitKind};
+    use cosmosearch_core::{AttributeValue, LimitKind, Number};
 
     use super::*;
 
@@ -832,7 +832,16 @@ mod tests {
     fn damaged_bytes_give_an_error_and_never_a_panic() {
         FileTable::decode(Bytes::from_static(b"garbage")).unwrap_err();
         let mut table = FileTable::new();
-        table.insert(entry("docs/a.txt").with_display_name(Some("name".to_owned())));
+        table.insert(
+            entry("docs/a.txt")
+                .with_display_name(Some("name".to_owned()))
+                .with_media_type(Some(MediaType::new("text/plain").unwrap()))
+                .with_modified(Some(Timestamp::from_millis(-3)))
+                .with_attributes(Attributes::from([(
+                    "amount".to_owned(),
+                    AttributeValue::Number(Number::new(2.5).unwrap()),
+                )])),
+        );
         let good = table.encode().unwrap();
         FileTable::decode(Bytes::copy_from_slice(&good[..good.len() / 2])).unwrap_err();
         for at in 0..good.len() {
@@ -842,18 +851,68 @@ mod tests {
         }
     }
 
+    fn attribute_value() -> impl Strategy<Value = AttributeValue> {
+        prop_oneof![
+            ".{0,8}".prop_map(AttributeValue::One),
+            prop::collection::vec(".{0,8}", 0..3).prop_map(AttributeValue::Many),
+            any::<f64>()
+                .prop_filter_map("finite", Number::new)
+                .prop_map(AttributeValue::Number),
+            any::<i64>().prop_map(|millis| AttributeValue::Time(Timestamp::from_millis(millis))),
+        ]
+    }
+
+    #[test]
+    fn a_stored_media_type_that_is_not_valid_is_an_error() {
+        let mut columns = empty_columns();
+        let one = |values: Vec<Option<&str>>| -> ArrayRef { Arc::new(StringArray::from(values)) };
+        columns[0] = Arc::new(UInt64Array::from_iter_values([0]));
+        columns[1] = Arc::new(StringArray::from_iter_values(["docs/a.txt"]));
+        columns[2] = Arc::new(UInt64Array::from_iter_values([5]));
+        columns[3] = Arc::new(StringArray::from_iter_values(["9f3a"]));
+        columns[4] = Arc::new(UInt64Array::from_iter_values([3]));
+        columns[5] = Arc::new(StringArray::from_iter_values(["pending"]));
+        columns[6] = one(vec![None]);
+        columns[7] = one(vec![None]);
+        columns[8] = one(vec![Some("not a media type")]);
+        columns[9] = Arc::new(Int64Array::from(vec![None::<i64>]));
+        columns[10] = Arc::new(StringArray::from_iter_values(["{}"]));
+        columns[11] = Arc::new(UInt32Array::from_iter_values([0]));
+        let metadata = vec![(NEXT_ORDINAL, "1".to_owned())];
+        let bytes = stored::write(schema(), columns, FORMAT, metadata).unwrap();
+        let err = FileTable::decode(Bytes::from(bytes)).unwrap_err();
+        assert!(matches!(err, Error::Core(_)), "{err}");
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(32))]
 
         #[test]
         fn any_table_round_trips(
-            files in prop::collection::btree_map("[a-z/é]{1,20}", (any::<u64>(), "[a-f0-9]{1,16}", prop::option::of(".{0,12}")), 0..40),
+            files in prop::collection::btree_map(
+                "[a-z/é]{1,20}",
+                (
+                    any::<u64>(),
+                    "[a-f0-9]{1,16}",
+                    prop::option::of(".{0,12}"),
+                    prop::option::of("[a-z]{1,8}/[a-z0-9.+-]{1,12}"),
+                    prop::option::of(any::<i64>()),
+                    prop::collection::btree_map("[a-z]{1,6}", attribute_value(), 0..4),
+                ),
+                0..40,
+            ),
         ) {
             let mut table = FileTable::new();
-            for (key, (size, tag, name)) in files {
+            for (key, (size, tag, name, media_type, modified, attributes)) in files {
                 let etag = ETag::new(tag).unwrap();
                 let version = ManifestVersion::new(7).unwrap();
-                table.insert(FileEntry::pending(key, size, etag, version).with_display_name(name));
+                table.insert(
+                    FileEntry::pending(key, size, etag, version)
+                        .with_display_name(name)
+                        .with_media_type(media_type.map(|value| MediaType::new(value).unwrap()))
+                        .with_modified(modified.map(Timestamp::from_millis))
+                        .with_attributes(attributes),
+                );
             }
             prop_assert_eq!(round_trip(&table), table);
         }

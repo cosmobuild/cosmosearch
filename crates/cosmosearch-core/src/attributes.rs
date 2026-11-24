@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::Timestamp;
 
 /// A finite number a host attaches to a file, kept as a 64-bit float.
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, Copy)]
 pub struct Number(f64);
 
 impl Number {
@@ -42,10 +41,19 @@ impl Ord for Number {
     }
 }
 
+impl Serialize for Number {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0.to_string())
+    }
+}
+
 impl<'de> Deserialize<'de> for Number {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = f64::deserialize(deserializer)?;
-        Number::new(value).ok_or_else(|| serde::de::Error::custom("the number is not finite"))
+        let text = String::deserialize(deserializer)?;
+        text.parse::<f64>()
+            .ok()
+            .and_then(Number::new)
+            .ok_or_else(|| serde::de::Error::custom("the number is not a finite decimal"))
     }
 }
 
@@ -69,7 +77,7 @@ pub enum AttributeValue {
 enum Stored {
     One(String),
     Many(Vec<String>),
-    Number(Number),
+    Number { number: Number },
     Time { time: Timestamp },
 }
 
@@ -78,7 +86,7 @@ impl From<Stored> for AttributeValue {
         match stored {
             Stored::One(value) => AttributeValue::One(value),
             Stored::Many(values) => AttributeValue::Many(values),
-            Stored::Number(number) => AttributeValue::Number(number),
+            Stored::Number { number } => AttributeValue::Number(number),
             Stored::Time { time } => AttributeValue::Time(time),
         }
     }
@@ -89,7 +97,7 @@ impl From<AttributeValue> for Stored {
         match value {
             AttributeValue::One(value) => Stored::One(value),
             AttributeValue::Many(values) => Stored::Many(values),
-            AttributeValue::Number(number) => Stored::Number(number),
+            AttributeValue::Number(number) => Stored::Number { number },
             AttributeValue::Time(time) => Stored::Time { time },
         }
     }
@@ -122,10 +130,37 @@ mod tests {
         let json = serde_json::to_string(&attributes).unwrap();
         assert_eq!(
             json,
-            r#"{"amount":12.5,"labels":["a","b"],"owner":"legal","signed":{"time":-5}}"#
+            r#"{"amount":{"number":"12.5"},"labels":["a","b"],"owner":"legal","signed":{"time":-5}}"#
         );
         let back: Attributes = serde_json::from_str(&json).unwrap();
         assert_eq!(back, attributes);
+    }
+
+    #[test]
+    fn a_number_round_trips_exactly_and_a_bad_one_is_refused() {
+        for value in [
+            4.764_216_654_515_026_3e86,
+            -874_941_090_656_061.5,
+            0.1,
+            f64::MIN_POSITIVE,
+        ] {
+            let value = AttributeValue::Number(Number::new(value).unwrap());
+            let json = serde_json::to_string(&value).unwrap();
+            assert_eq!(
+                serde_json::from_str::<AttributeValue>(&json).unwrap(),
+                value
+            );
+        }
+        for json in [
+            r#"{"number":"NaN"}"#,
+            r#"{"number":"inf"}"#,
+            r#"{"number":"x"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<AttributeValue>(json).is_err(),
+                "{json}"
+            );
+        }
     }
 
     #[test]
