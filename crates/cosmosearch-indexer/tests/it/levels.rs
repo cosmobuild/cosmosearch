@@ -56,7 +56,7 @@ pub(super) fn vectors(model: &str) -> SharedIndex {
 }
 
 fn plugin_for(rebuild: &Rebuild) -> SharedIndex {
-    if rebuild.kind().as_str() == "bm25" {
+    if rebuild.kind() == bm25().get().kind() {
         bm25()
     } else {
         vectors(rebuild.model_id().unwrap().as_str())
@@ -142,7 +142,7 @@ async fn rebuilds_never_mix_segments_of_different_plugins() {
     let lexical = f.segments_at(Level::L1).await;
     let vector_segments = f.segments_at(Level::L2).await;
     for rebuild in &rebuilds {
-        let expected = if rebuild.kind().as_str() == "bm25" {
+        let expected = if rebuild.kind() == bm25().get().kind() {
             &lexical
         } else {
             &vector_segments
@@ -196,7 +196,7 @@ async fn a_rebuild_built_with_another_plugin_is_refused() {
 
     let err = f.indexer.publish(&built).await.unwrap_err();
     assert!(
-        matches!(&err, Error::WrongPlugin { kind } if kind.as_str() == "bm25"),
+        matches!(&err, Error::WrongPlugin { kind } if kind == bm25().get().kind()),
         "{err}"
     );
     assert_eq!(f.version().await, version);

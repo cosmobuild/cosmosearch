@@ -830,10 +830,16 @@ async fn a_damaged_segment_gives_an_error_or_hits_and_never_a_panic() {
 async fn a_stemmed_index_matches_other_forms_of_a_word_and_plain_does_not() {
     let handle = index().await;
     let texts = ["refunds are issued", "the refunded order", "a policy"];
-    let english = Bm25::stemmed(Language::English).unwrap();
+    let english = Bm25::new().unwrap();
+    let plain = Bm25::plain().unwrap();
     assert_eq!(english.kind().as_str(), "bm25-stem-en");
+    assert_eq!(
+        Bm25::stemmed(Language::English).unwrap().kind(),
+        english.kind()
+    );
+    assert_eq!(plain.kind().as_str(), "bm25");
     let stemmed = store_segment_by(&english, &handle, "s1", &texts).await;
-    let plain = store_segment(&handle, "s2", &texts).await;
+    let unstemmed = store_segment_by(&plain, &handle, "s2", &texts).await;
     let found = search_query(
         &english,
         &handle,
@@ -845,18 +851,25 @@ async fn a_stemmed_index_matches_other_forms_of_a_word_and_plain_does_not() {
     let phrase = Query::new("\"refund order\"").with_exact_phrases();
     let found = search_query(&english, &handle, std::slice::from_ref(&stemmed), phrase).await;
     assert_eq!(rows(&found), [1]);
-    let plain_found = search(&handle, std::slice::from_ref(&plain), "refund", 10).await;
+    let plain_found = search_query(
+        &plain,
+        &handle,
+        std::slice::from_ref(&unstemmed),
+        Query::new("refund"),
+    )
+    .await;
     assert_eq!(rows(&plain_found), Vec::<u64>::new());
     let mixed = search_query(
         &english,
         &handle,
-        std::slice::from_ref(&plain),
+        std::slice::from_ref(&unstemmed),
         Query::new("refunds"),
     )
     .await;
     assert_eq!(rows(&mixed), Vec::<u64>::new());
+    let both = [stemmed, unstemmed];
     assert_eq!(
-        search(&handle, &[stemmed, plain], "refunds", 10)
+        search_query(&plain, &handle, &both, Query::new("refunds"))
             .await
             .len(),
         1
@@ -864,7 +877,7 @@ async fn a_stemmed_index_matches_other_forms_of_a_word_and_plain_does_not() {
 }
 
 #[tokio::test]
-async fn a_file_name_matches_with_less_weight_on_its_first_chunk_only() {
+async fn a_file_name_matches_on_its_first_chunk_only_with_its_own_weight() {
     let handle = index().await;
     let mut chunks = chunks_of("docs/travel-policy.pdf", &["flights and hotels", "meals"]);
     chunks.extend(
@@ -887,6 +900,13 @@ async fn a_file_name_matches_with_less_weight_on_its_first_chunk_only() {
     );
     let exact = search_exact(&handle, segments, "\"staff handbook\"", 10).await;
     assert_eq!(rows(&exact), Vec::<u64>::new());
+    let off = plugin().name_weight(0.0);
+    let found = search_query(&off, &handle, segments, Query::new("handbook")).await;
+    assert_eq!(rows(&found), [4]);
+    let heavy = plugin().name_weight(4.0);
+    let found = search_query(&heavy, &handle, segments, Query::new("handbook")).await;
+    assert_eq!(rows(&found), [2, 4]);
+    assert_ne!(off.search_settings(), plugin().search_settings());
 }
 
 #[tokio::test]

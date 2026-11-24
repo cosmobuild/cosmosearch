@@ -29,7 +29,8 @@ If the index is lost or damaged, you delete it and build it again from the files
 ## Features
 
 - Keyword search everywhere, vector search where it pays off, merged and optionally reranked.
-  Keyword search can stem words in one of 18 languages, so `refund` also finds `refunds`.
+  Keyword search stems English words by default, or those of another of 18 languages, so
+  `refund` also finds `refunds`.
 - Exact phrases on request: with `Query::with_exact_phrases`, text in double quotes, such as
   `"ERR_CONN_42"` or `"refund policy"`, must appear in keyword results. With
   `Query::with_every_word`, keyword results hold every word instead of any.

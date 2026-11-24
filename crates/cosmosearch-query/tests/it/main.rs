@@ -864,7 +864,7 @@ async fn opening_and_reading_need_the_plugins_that_built_the_index() {
     .unwrap_err();
     assert_eq!(
         err.to_string(),
-        "this index needs plug-ins that were not added: extractor `text-2`, index `bm25`"
+        "this index needs plug-ins that were not added: extractor `text-2`, index `bm25-stem-en`"
     );
 }
 
@@ -918,8 +918,8 @@ async fn lists_of_two_index_kinds_fuse_on_the_passage() {
             .map(|(kind, _)| kind.to_string())
             .collect()
     };
-    assert_eq!(kinds(&hits[0]), ["backwards", "bm25"], "{hits:?}");
-    assert_eq!(kinds(&hits[1]), ["backwards", "bm25"], "{hits:?}");
+    assert_eq!(kinds(&hits[0]), ["backwards", "bm25-stem-en"], "{hits:?}");
+    assert_eq!(kinds(&hits[1]), ["backwards", "bm25-stem-en"], "{hits:?}");
     assert_eq!(kinds(&hits[2]), ["backwards"], "{hits:?}");
     let bm25 = |hit: &SearchHit| hit.list_scores()[1].1;
     let a = hits
@@ -944,8 +944,8 @@ async fn lists_of_two_index_kinds_fuse_on_the_passage() {
             .map(|(kind, rank)| (kind.to_string(), *rank))
             .collect()
     };
-    assert_eq!(ranks(&alone[0]), [("bm25".to_owned(), 1)]);
-    assert_eq!(ranks(&alone[1]), [("bm25".to_owned(), 2)]);
+    assert_eq!(ranks(&alone[0]), [("bm25-stem-en".to_owned(), 1)]);
+    assert_eq!(ranks(&alone[1]), [("bm25-stem-en".to_owned(), 2)]);
     let mut backwards_ranks: Vec<u32> = hits
         .iter()
         .map(|hit| {
