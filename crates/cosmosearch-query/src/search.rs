@@ -7,7 +7,7 @@ use cosmosearch_core::{
     AllowedRows, ExtractorProfile, Filter, Hit, IndexError, IndexKind, Level, Locator, Manifest,
     ManifestVersion, Scope, SegmentEntry, SegmentId, ShardEntry, ShardId, SourceRef, Status, Usage,
 };
-use cosmosearch_format::{ChunkTable, FileTable};
+use cosmosearch_format::{ChunkTable, FileEntry, FileTable};
 use futures_util::{StreamExt, TryStreamExt, future, stream};
 
 use crate::coverage::Counts;
@@ -35,8 +35,10 @@ pub struct SearchHit {
     source: SourceRef,
     score: f32,
     list_scores: Vec<(IndexKind, f32)>,
+    list_ranks: Vec<(IndexKind, u32)>,
     rerank_score: Option<f32>,
     heading_path: Vec<String>,
+    display_name: Option<String>,
     snippet: Option<Snippet>,
 }
 
@@ -57,6 +59,18 @@ impl SearchHit {
     /// unbounded score, a vector index a similarity.
     pub fn list_scores(&self) -> &[(IndexKind, f32)] {
         &self.list_scores
+    }
+
+    /// The rank each index kind's list gave the passage, counting from 1, for the kinds whose
+    /// list held it, in the order of the kinds: with [`SearchHit::list_scores`], why fusion
+    /// placed the hit where it is.
+    pub fn list_ranks(&self) -> &[(IndexKind, u32)] {
+        &self.list_ranks
+    }
+
+    /// The name the host gave the passage's file, if any.
+    pub fn display_name(&self) -> Option<&str> {
+        self.display_name.as_deref()
     }
 
     /// The reranker's score, for a hit in the shortlist whose passage could be read. Reranked
@@ -100,8 +114,13 @@ impl fmt::Debug for SearchHit {
             .field("source", &self.source)
             .field("score", &self.score)
             .field("list_scores", &self.list_scores)
+            .field("list_ranks", &self.list_ranks)
             .field("rerank_score", &self.rerank_score)
             .field("headings", &self.heading_path.len())
+            .field(
+                "display_name_bytes",
+                &self.display_name.as_ref().map(String::len),
+            )
             .field("snippet", &self.snippet)
             .finish()
     }
@@ -183,9 +202,17 @@ impl SearchResults {
                     .iter()
                     .map(|(kind, _)| kind.as_str().len().saturating_add(LIST_SCORE_BYTES))
                     .sum();
+                let ranks: usize = hit
+                    .list_ranks
+                    .iter()
+                    .map(|(kind, _)| kind.as_str().len().saturating_add(LIST_SCORE_BYTES))
+                    .sum();
+                let name = hit.display_name.as_ref().map_or(0, String::len);
                 HIT_BYTES
                     .saturating_add(snippet)
                     .saturating_add(lists)
+                    .saturating_add(ranks)
+                    .saturating_add(name)
                     .saturating_add(hit.source.to_string().len())
                     .saturating_add(headings)
             })
@@ -426,7 +453,7 @@ pub(crate) async fn run(
             Ok::<_, IndexError>((kind, weight, found, of_kind))
         })
     });
-    let mut list_scores: BTreeMap<ChunkKey, Vec<(IndexKind, f32)>> = BTreeMap::new();
+    let mut places_in_lists = ListPlaces::default();
     for (kind, weight, found, of_kind) in future::try_join_all(searches).await? {
         kinds_segments.push(of_kind);
         *usage = usage.saturating_add(found.usage());
@@ -438,15 +465,13 @@ pub(crate) async fn run(
                 .then_with(|| a.row().cmp(&b.row()))
         });
         let mut list = Vec::with_capacity(hits.len());
+        let mut rank = 0;
         for hit in hits {
             let Some(segment) = by_id.get(hit.segment()) else {
                 continue;
             };
             if let Some((key, passage, place)) = resolve(segment, &hit, manifest)? {
-                let scores = list_scores.entry(key.clone()).or_default();
-                if !scores.iter().any(|(scored, _)| scored == kind) {
-                    scores.push((kind.clone(), hit.score()));
-                }
+                places_in_lists.record(&key, kind, hit.score(), &mut rank);
                 passages.entry(key.clone()).or_insert(passage);
                 places.entry(key.clone()).or_insert(place);
                 list.push(key);
@@ -465,7 +490,7 @@ pub(crate) async fn run(
     for (key, score) in fuse::fuse(&lists, fusion.k(), limit, covers) {
         if let Some(mut passage) = passages.remove(&key) {
             passage.score = score;
-            passage.list_scores = list_scores.remove(&key).unwrap_or_default();
+            places_in_lists.place(&key, &mut passage);
             found.push(passage);
         }
     }
@@ -474,6 +499,36 @@ pub(crate) async fn run(
         covered,
         counts,
     })
+}
+
+/// Where each passage stood in each index kind's list: its score and its rank among the
+/// distinct passages of that list.
+#[derive(Default)]
+struct ListPlaces {
+    scores: BTreeMap<ChunkKey, Vec<(IndexKind, f32)>>,
+    ranks: BTreeMap<ChunkKey, Vec<(IndexKind, u32)>>,
+}
+
+impl ListPlaces {
+    /// Records the passage's place in `kind`'s list unless the list held it already, counting
+    /// it in `rank`.
+    fn record(&mut self, key: &ChunkKey, kind: &IndexKind, score: f32, rank: &mut u32) {
+        let scores = self.scores.entry(key.clone()).or_default();
+        if scores.iter().any(|(scored, _)| scored == kind) {
+            return;
+        }
+        scores.push((kind.clone(), score));
+        *rank = rank.saturating_add(1);
+        self.ranks
+            .entry(key.clone())
+            .or_default()
+            .push((kind.clone(), *rank));
+    }
+
+    fn place(&mut self, key: &ChunkKey, hit: &mut SearchHit) {
+        hit.list_scores = self.scores.remove(key).unwrap_or_default();
+        hit.list_ranks = self.ranks.remove(key).unwrap_or_default();
+    }
 }
 
 /// The segments of `searchable` with rows in `allowed`, by the index kind that built them.
@@ -653,8 +708,14 @@ fn resolve(
                 source,
                 score: hit.score(),
                 list_scores: Vec::new(),
+                list_ranks: Vec::new(),
                 rerank_score: None,
                 heading_path: record.heading_path().to_vec(),
+                display_name: holder
+                    .files
+                    .by_ordinal(record.file_ordinal())
+                    .and_then(FileEntry::display_name)
+                    .map(str::to_owned),
                 snippet: None,
             };
             let place = Place {

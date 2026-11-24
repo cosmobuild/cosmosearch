@@ -935,6 +935,60 @@ async fn lists_of_two_index_kinds_fuse_on_the_passage() {
     assert_eq!(keys, ["docs/a.txt", "docs/b.txt"]);
     assert!((alone[0].score() - 1.0 / 61.0).abs() < 1e-6, "{alone:?}");
     assert!((alone[1].score() - 1.0 / 62.0).abs() < 1e-6, "{alone:?}");
+    let ranks = |hit: &SearchHit| -> Vec<(String, u32)> {
+        hit.list_ranks()
+            .iter()
+            .map(|(kind, rank)| (kind.to_string(), *rank))
+            .collect()
+    };
+    assert_eq!(ranks(&alone[0]), [("bm25".to_owned(), 1)]);
+    assert_eq!(ranks(&alone[1]), [("bm25".to_owned(), 2)]);
+    let mut backwards_ranks: Vec<u32> = hits
+        .iter()
+        .map(|hit| {
+            assert_eq!(
+                ranks(hit)
+                    .iter()
+                    .map(|(kind, _)| kind.clone())
+                    .collect::<Vec<_>>(),
+                kinds(hit)
+            );
+            ranks(hit)[0].1
+        })
+        .collect();
+    backwards_ranks.sort_unstable();
+    assert_eq!(backwards_ranks, [1, 2, 3]);
+    let mut bm25_ranks: Vec<u32> = hits[..2].iter().map(|hit| ranks(hit)[1].1).collect();
+    bm25_ranks.sort_unstable();
+    assert_eq!(bm25_ranks, [1, 2]);
+}
+
+#[tokio::test]
+async fn a_hit_carries_the_display_name_of_its_file() {
+    let f = Fixture::new().await;
+    f.index(&[
+        ("docs/a.txt", b"refund policy"),
+        ("docs/b.txt", b"refund rules"),
+    ])
+    .await;
+    let change = AttributeChange::new("docs/b.txt").display_name("Refund rules 2024");
+    f.indexer
+        .apply(vec![FileChange::Attributes(change)])
+        .await
+        .unwrap();
+    f.reader.refresh().await.unwrap();
+    let hits = f.search("refund").await;
+    let names: BTreeMap<&str, Option<&str>> = hits
+        .iter()
+        .map(|hit| (hit.source().location().key(), hit.display_name()))
+        .collect();
+    assert_eq!(
+        names,
+        BTreeMap::from([
+            ("docs/a.txt", None),
+            ("docs/b.txt", Some("Refund rules 2024"))
+        ])
+    );
 }
 
 #[tokio::test]

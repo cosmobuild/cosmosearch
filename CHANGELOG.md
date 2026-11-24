@@ -33,6 +33,9 @@ All notable changes are listed here. The format follows
   text. Words in quotes still match only the text. A display name changed through
   `FileChange::Attributes` is matched once the file is indexed again, for example after a
   retry.
+- `SearchHit::display_name` gives the name the host gave the hit's file, and
+  `SearchHit::list_ranks` gives the hit's rank in each index kind's list, beside
+  `list_scores`, so a host can see why fusion placed it.
 
 ### Changed
 
