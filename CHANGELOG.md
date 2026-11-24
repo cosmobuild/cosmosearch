@@ -30,16 +30,15 @@ All notable changes are listed here. The format follows
   the same way. `Bm25::new` does not stem, as before.
 - Keyword search matches a file's name: its display name and the last part of its key
   without the extension, on the first chunk of the file and with half the weight of the
-  text. Words in quotes still match only the text.
+  text. Words in quotes still match only the text. A display name changed through
+  `FileChange::Attributes` is matched once the file is indexed again, for example after a
+  retry.
 
 ### Changed
 
 - The file table format changed, so indexes built by 0.1 must be built again.
 - `Filter::matches` also takes the file's modified time.
 - `Extractors::for_file` replaces `Extractors::for_key` and takes the file's media type.
-- A new display name, through `FileChange::Attributes`, makes the file wait for a job
-  again, because keyword search reads it. New attributes alone still change only the file
-  table.
 - A PDF that the decoded-bytes check cannot load fails as malformed, even where the parser
   could have repaired it.
 - A search whose scope names a prefix outside the data location fails with

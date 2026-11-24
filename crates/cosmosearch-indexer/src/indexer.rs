@@ -574,7 +574,7 @@ fn apply_step(
         Step::Upsert(incoming) => apply_upsert(table, incoming, version),
         Step::Remove { key, expected } => apply_remove(table, key, *expected),
         Step::Retry { key, expected } => apply_retry(table, key, *expected, version),
-        Step::Describe(change) => apply_describe(table, change, version),
+        Step::Describe(change) => apply_describe(table, change),
         Step::Record {
             key,
             planned,
@@ -661,18 +661,15 @@ fn apply_retry(
     }
 }
 
-fn apply_describe(
-    table: &mut FileTable,
-    change: &AttributeChange,
-    version: ManifestVersion,
-) -> ChangeOutcome {
+fn apply_describe(table: &mut FileTable, change: &AttributeChange) -> ChangeOutcome {
     let Some(entry) = table.get(&change.key) else {
         return ChangeOutcome::NotFound;
     };
-    let renamed = entry.display_name() != change.display_name.as_deref();
     if moved_on(table, &change.key, change.expected) {
         ChangeOutcome::Stale
-    } else if !renamed && entry.attributes() == &change.attributes {
+    } else if entry.display_name() == change.display_name.as_deref()
+        && entry.attributes() == &change.attributes
+    {
         ChangeOutcome::Unchanged
     } else {
         table.describe(
@@ -680,9 +677,6 @@ fn apply_describe(
             change.display_name.clone(),
             change.attributes.clone(),
         );
-        if renamed {
-            table.make_pending(&change.key, version);
-        }
         ChangeOutcome::Applied
     }
 }

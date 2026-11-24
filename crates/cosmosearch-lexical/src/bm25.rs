@@ -139,8 +139,8 @@ fn names(chunks: &[Chunk]) -> Vec<Option<String>> {
 /// A BM25 keyword index, one bundled file per segment.
 ///
 /// A chunk matches if it holds any word of the query. The first chunk of each file also
-/// matches the words of the file's name, its display name and the last part of its key
-/// without the extension, with half the weight of its text. For a query made with
+/// matches the words of the file's name, its display name when it was indexed and the last
+/// part of its key without the extension, with half the weight of its text. For a query made with
 /// [`Query::with_exact_phrases`], text in double quotes is a phrase: a chunk matches only if it
 /// holds those words next to each other, in that order, whatever their case and the
 /// punctuation between them. Every phrase must match, and the other words rank the chunks that

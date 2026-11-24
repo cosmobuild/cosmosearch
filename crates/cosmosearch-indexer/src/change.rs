@@ -51,7 +51,8 @@ impl FileUpsert {
         self
     }
 
-    /// Sets the name to show for this file, which keyword search also matches.
+    /// Sets the name to show for this file. Keyword search matches the name the file had
+    /// when it was last indexed.
     #[must_use]
     pub fn display_name(mut self, name: impl Into<String>) -> Self {
         self.display_name = Some(name.into());
@@ -95,9 +96,10 @@ impl FileUpsert {
 
 /// New attributes and display name for a file already in the index.
 ///
-/// New attributes alone leave the file as it is, with its content version and status. A new
-/// display name makes the file wait for a job again at a new content version, because
-/// keyword search reads the display name.
+/// They replace what the index holds, so a display name left out is removed. The file is not
+/// read again and keeps its content version and status. Keyword search matches the display
+/// name the file had when it was last indexed, until its content changes or
+/// [`FileChange::Retry`] indexes it again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttributeChange {
     pub(crate) key: String,
@@ -118,7 +120,8 @@ impl AttributeChange {
         }
     }
 
-    /// Sets the name to show for this file, which keyword search also matches.
+    /// Sets the name to show for this file. Keyword search matches the name the file had
+    /// when it was last indexed.
     #[must_use]
     pub fn display_name(mut self, name: impl Into<String>) -> Self {
         self.display_name = Some(name.into());
@@ -162,8 +165,7 @@ pub enum FileChange {
         /// The content version the file must still have.
         expected: Option<ManifestVersion>,
     },
-    /// A file's attributes and display name are replaced. A new display name indexes the file
-    /// again.
+    /// A file's attributes and display name are replaced; its content stays as indexed.
     Attributes(AttributeChange),
 }
 
