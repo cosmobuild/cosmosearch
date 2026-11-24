@@ -36,7 +36,9 @@ If the index is lost or damaged, you delete it and build it again from the files
   embedding API and `/rerank` API over HTTP.
 - Results that cite a file, a byte range or page, and the file version they were read from.
   Reading a result back fails if the file has changed since.
-- Search scopes (only these prefixes) and budgets (this many shards, this much time).
+- Search scopes (only these prefixes), filters on your own attributes (values, numbers and
+  times, by value or range) and on modified time, and budgets (this many shards, this much
+  time).
 - Safe concurrent writers: index updates are atomic commits, and two writers never
   overwrite each other.
 - Everything beyond the core is an optional feature, so you compile only what you use.

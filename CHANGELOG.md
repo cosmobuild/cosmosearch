@@ -19,10 +19,16 @@ All notable changes are listed here. The format follows
   key's extension, so files without an extension, or with a misleading one, can be indexed.
   Extractors name the media types they read with `Extractor::media_types`, and the built-in
   ones name theirs. Changing a file's media type indexes it again.
+- Attributes can be numbers (`AttributeValue::Number`) and times (`AttributeValue::Time`,
+  a `Timestamp`) as well as strings. `Filter::numbers` and `Filter::times` keep files whose
+  attribute is within a range, and `Filter::modified` keeps files modified within a range.
+  The file table records each file's modified time from the listing or a HEAD, or from
+  `FileUpsert::modified`.
 
 ### Changed
 
 - The file table format changed, so indexes built by 0.1 must be built again.
+- `Filter::matches` also takes the file's modified time.
 - A PDF that the decoded-bytes check cannot load fails as malformed, even where the parser
   could have repaired it.
 - A search whose scope names a prefix outside the data location fails with

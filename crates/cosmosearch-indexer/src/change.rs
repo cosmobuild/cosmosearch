@@ -1,4 +1,4 @@
-use cosmosearch_core::{AttributeValue, Attributes, ETag, ManifestVersion, MediaType};
+use cosmosearch_core::{AttributeValue, Attributes, ETag, ManifestVersion, MediaType, Timestamp};
 
 /// A file's size and ETag, when the host already knows them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +21,7 @@ pub struct FileUpsert {
     pub(crate) fields: Option<StoreFields>,
     pub(crate) display_name: Option<String>,
     pub(crate) media_type: Option<MediaType>,
+    pub(crate) modified: Option<Timestamp>,
     pub(crate) attributes: Attributes,
     pub(crate) expected: Option<ManifestVersion>,
 }
@@ -37,6 +38,7 @@ impl FileUpsert {
             fields: None,
             display_name: None,
             media_type: None,
+            modified: None,
             attributes: Attributes::new(),
             expected: None,
         }
@@ -62,6 +64,17 @@ impl FileUpsert {
     #[must_use]
     pub fn media_type(mut self, media_type: MediaType) -> Self {
         self.media_type = Some(media_type);
+        self
+    }
+
+    /// Sets when this version of the file was last modified, which [`Filter::modified`]
+    /// checks. Without it, the time comes from the store when the file is read with a HEAD,
+    /// and is not known when [`FileUpsert::fields`] supplies the size and ETag.
+    ///
+    /// [`Filter::modified`]: cosmosearch_core::Filter::modified
+    #[must_use]
+    pub fn modified(mut self, modified: Timestamp) -> Self {
+        self.modified = Some(modified);
         self
     }
 

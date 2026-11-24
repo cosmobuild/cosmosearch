@@ -2,10 +2,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use arrow_array::{Array, ArrayRef, StringArray, UInt32Array, UInt64Array};
+use arrow_array::{Array, ArrayRef, Int64Array, StringArray, UInt32Array, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
 use bytes::Bytes;
-use cosmosearch_core::{Attributes, ETag, ExtractFailure, ManifestVersion, MediaType};
+use cosmosearch_core::{Attributes, ETag, ExtractFailure, ManifestVersion, MediaType, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{EncodingError, malformed};
@@ -24,6 +24,7 @@ const STATUS: &str = "status";
 const REASON: &str = "reason";
 const DISPLAY_NAME: &str = "display_name";
 const MEDIA_TYPE: &str = "media_type";
+const MODIFIED: &str = "modified";
 const ATTRIBUTES: &str = "attributes";
 const UNREAD_PARTS: &str = "unread_parts";
 
@@ -103,6 +104,7 @@ pub struct FileEntry {
     reason: Option<FileReason>,
     display_name: Option<String>,
     media_type: Option<MediaType>,
+    modified: Option<Timestamp>,
     attributes: Attributes,
     unread_parts: u32,
 }
@@ -125,6 +127,7 @@ impl FileEntry {
             reason: None,
             display_name: None,
             media_type: None,
+            modified: None,
             attributes: Attributes::new(),
             unread_parts: 0,
         }
@@ -141,6 +144,13 @@ impl FileEntry {
     #[must_use]
     pub fn with_media_type(mut self, media_type: Option<MediaType>) -> Self {
         self.media_type = media_type;
+        self
+    }
+
+    /// Sets when the recorded version of the file was last modified.
+    #[must_use]
+    pub fn with_modified(mut self, modified: Option<Timestamp>) -> Self {
+        self.modified = modified;
         self
     }
 
@@ -195,6 +205,12 @@ impl FileEntry {
     /// key's extension.
     pub fn media_type(&self) -> Option<&MediaType> {
         self.media_type.as_ref()
+    }
+
+    /// When the recorded version of the file was last modified, as the store or the host
+    /// reported it.
+    pub fn modified(&self) -> Option<Timestamp> {
+        self.modified
     }
 
     /// The file's attributes.
@@ -396,6 +412,12 @@ impl FileTable {
             Arc::new(StringArray::from(reasons)),
             Arc::new(StringArray::from(display_names)),
             Arc::new(StringArray::from(media_types)),
+            Arc::new(Int64Array::from(
+                files
+                    .iter()
+                    .map(|f| f.modified.map(Timestamp::millis))
+                    .collect::<Vec<_>>(),
+            )),
             Arc::new(StringArray::from_iter_values(attributes)),
             Arc::new(UInt32Array::from_iter_values(
                 files.iter().map(|f| f.unread_parts),
@@ -436,6 +458,7 @@ impl FileTable {
             let reasons = optional::<StringArray>(batch, REASON)?;
             let names = optional::<StringArray>(batch, DISPLAY_NAME)?;
             let media_types = optional::<StringArray>(batch, MEDIA_TYPE)?;
+            let modified = optional::<Int64Array>(batch, MODIFIED)?;
             let attributes = required::<StringArray>(batch, ATTRIBUTES)?;
             let unread = required::<UInt32Array>(batch, UNREAD_PARTS)?;
             for row in 0..batch.num_rows() {
@@ -473,6 +496,8 @@ impl FileTable {
                     } else {
                         Some(MediaType::new(media_types.value(row))?)
                     },
+                    modified: (!modified.is_null(row))
+                        .then(|| Timestamp::from_millis(modified.value(row))),
                     attributes,
                     unread_parts,
                 })?;
@@ -509,6 +534,7 @@ fn schema() -> Schema {
         Field::new(REASON, DataType::Utf8, true),
         Field::new(DISPLAY_NAME, DataType::Utf8, true),
         Field::new(MEDIA_TYPE, DataType::Utf8, true),
+        Field::new(MODIFIED, DataType::Int64, true),
         Field::new(ATTRIBUTES, DataType::Utf8, false),
         Field::new(UNREAD_PARTS, DataType::UInt32, false),
     ])
@@ -549,6 +575,7 @@ mod tests {
             entry("docs/a.txt")
                 .with_display_name(Some("Contract A".to_owned()))
                 .with_media_type(Some(MediaType::new("text/markdown").unwrap()))
+                .with_modified(Some(Timestamp::from_millis(1_700_000_000_000)))
                 .with_attributes(attributes),
         );
         table.insert(entry("docs/b.txt"));
@@ -767,6 +794,7 @@ mod tests {
                 "reason:Utf8",
                 "display_name:Utf8",
                 "media_type:Utf8",
+                "modified:Int64",
                 "attributes:Utf8",
                 "unread_parts:UInt32",
             ]
@@ -794,6 +822,7 @@ mod tests {
             Arc::new(StringArray::from(Vec::<Option<&str>>::new())),
             Arc::new(StringArray::from(Vec::<Option<&str>>::new())),
             Arc::new(StringArray::from(Vec::<Option<&str>>::new())),
+            Arc::new(Int64Array::from(Vec::<Option<i64>>::new())),
             Arc::new(StringArray::from_iter_values(Vec::<String>::new())),
             Arc::new(UInt32Array::from_iter_values([])),
         ]

@@ -61,7 +61,7 @@ files produce new segments, and nothing is edited in place. A segment can hold:
 
 | File | Contents |
 | --- | --- |
-| `meta-<id>.parquet` | The file table: key, size, ETag, status, attributes |
+| `meta-<id>.parquet` | The file table: key, size, ETag, status, media type, modified time, attributes |
 | `chunks-<id>.parquet` | One record per chunk: where it is in its file, its headings, its hash |
 | `lex-<id>.bin` | The BM25 keyword index (tantivy's files bundled into one object) |
 | `ivf-<id>.bin` | The vector index: centroids, cluster table, binary and int8 vectors |
@@ -165,9 +165,11 @@ limit was hit, the parser failed, or no part could be read, such as a scanned PD
 **unsupported** (no extractor for the type, or no text). You can ask for any file's status
 and the reason. A transient read error leaves the file pending rather than failing it.
 
-Files can carry **attributes**: a display name and any string or list values you attach.
-cosmosearch stores them without interpreting them, and search can filter on them. Changing
-attributes rewrites only the file table, with no re-reading or re-embedding.
+Files can carry **attributes**: a display name and any values you attach, each a string, a
+list of strings, a number or a time. cosmosearch stores them as given, and search can filter
+on them. Changing attributes rewrites only the file table, with no re-reading or
+re-embedding. The file table also records each file's media type, when you name one, and
+its modified time, from the store or from you.
 
 ## Indexing jobs
 
@@ -244,8 +246,8 @@ flowchart LR
    each result is keyed by everything that affects it, including each index plug-in's
    model and search settings (such as how many clusters IVF probes).
 2. **Prune.** A scope (a list of key prefixes) drops every shard it doesn't reach before
-   anything is read. Filters on attributes (a value, or any of several) then decide which
-   files each index may score. Pruning uses only the file table.
+   anything is read. Filters on attributes (a value, any of several, or a range of
+   numbers or times) and on the modified time then decide which files each index may score. Pruning uses only the file table.
 3. **Search each index.** BM25 and the vector index run at the same time, each over the
    segments that hold allowed files, reading only the parts they need by range request.
    A query made with `with_exact_phrases` asks BM25 to read text in double quotes as a

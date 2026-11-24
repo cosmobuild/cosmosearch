@@ -40,10 +40,11 @@ mod scope;
 mod search;
 mod split;
 mod status;
+mod time;
 mod usage;
 mod version;
 
-pub use attributes::{AttributeValue, Attributes};
+pub use attributes::{AttributeValue, Attributes, Number};
 pub use budget::Budget;
 pub use cache::{Admission, CachedFile, Placement, SegmentCache, SharedCache};
 pub use chunk::{Chunk, ChunkHash, indexed_text};
@@ -88,5 +89,6 @@ pub use search::{
 };
 pub use split::text_ranges;
 pub use status::Status;
+pub use time::Timestamp;
 pub use usage::Usage;
 pub use version::ManifestVersion;

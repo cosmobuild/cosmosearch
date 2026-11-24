@@ -96,7 +96,7 @@ pub(crate) async fn run(
         .ok_or_else(not_in_index)?;
     let files = sources.loader.files(shard).await?;
     let entry = files.get(location.key()).ok_or_else(not_in_index)?;
-    if access.is_some_and(|access| !access.filter.matches(entry.attributes())) {
+    if access.is_some_and(|access| !access.filter.matches(entry.attributes(), entry.modified())) {
         return Err(not_in_index());
     }
     if !reference.is_current(entry.etag()) {
