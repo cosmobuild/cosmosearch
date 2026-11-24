@@ -8,5 +8,7 @@
 
 mod bm25;
 mod bundle;
+mod language;
 
 pub use bm25::Bm25;
+pub use language::Language;

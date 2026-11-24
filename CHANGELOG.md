@@ -24,6 +24,10 @@ All notable changes are listed here. The format follows
   attribute is within a range, and `Filter::modified` keeps files modified within a range.
   The file table records each file's modified time from the listing or a HEAD, or from
   `FileUpsert::modified`.
+- `Bm25::stemmed(Language)` builds a keyword index that reduces words to their stems in one
+  of 18 languages, so a search for `refund` also finds `refunds` and `refunded`. Its kind,
+  such as `bm25-stem-en`, names the language, so a plug-in searches only the segments built
+  the same way. `Bm25::new` does not stem, as before.
 
 ### Changed
 

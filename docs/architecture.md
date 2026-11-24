@@ -82,7 +82,11 @@ capability.
 | L2 | Vector index (IVF) | For shards that are promoted, by usage or on request |
 
 Keyword search covers everything because it is cheap and needs no model. New files are
-always indexed at L1, and vectors are added only by promotion, where they pay off. A shard
+always indexed at L1, and vectors are added only by promotion, where they pay off. BM25
+lower-cases words and can also reduce them to their stems in one of 18 languages
+(`Bm25::stemmed`). How words are made is part of the plug-in's kind, so segments built one
+way are never searched the other way, and changing it means building the keyword segments
+again. A shard
 can also be demoted, which drops its vector segments and leaves it searchable by keyword.
 
 **Why IVF.** Graph-based vector indexes like HNSW are fast in memory but need many
