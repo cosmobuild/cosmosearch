@@ -108,6 +108,20 @@ pub enum Error {
         prefix: String,
     },
 
+    /// A key names no whole object key inside the data location.
+    #[error("the key `{key}` is outside the data location")]
+    FileOutsideData {
+        /// The key.
+        key: String,
+    },
+
+    /// A key names a file the index does not hold.
+    #[error("the file `{key}` is not in the index")]
+    FileNotInIndex {
+        /// The key.
+        key: String,
+    },
+
     /// A ref points at a file the index does not hold.
     #[error("`{reference}` names a file that is not in the index")]
     NotInIndex {

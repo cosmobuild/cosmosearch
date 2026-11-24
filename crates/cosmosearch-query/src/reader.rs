@@ -7,6 +7,7 @@ use cosmosearch_core::{
     ManifestVersion, ModelId, Query, Scope, SearchIdentity, SegmentId, ShardId, SharedCache,
     SharedHeat, SharedPassages, SharedReranker, SharedResults, Signal, SourceRef, Status, Usage,
 };
+use cosmosearch_format::FileEntry;
 use cosmosearch_store::{DataStore, IndexHandle, MetadataStore, OpenState};
 use tokio::time;
 use tracing::warn;
@@ -15,7 +16,7 @@ use crate::cached::{CacheView, CachedFiles};
 use crate::deadline;
 use crate::fuse::Fusion;
 use crate::passages::Passages;
-use crate::read::{Access, Reach, Sources};
+use crate::read::{Access, Reach, Sources, Target};
 use crate::search::{Reached, Searched};
 use crate::tables::{Loader, Tables};
 use crate::{
@@ -496,7 +497,8 @@ impl Reader {
         before: usize,
         after: usize,
     ) -> Result<Reading> {
-        self.read_reach(reference, Reach { before, after }, None)
+        let reach = Reach { before, after };
+        self.read_target(Target::Passage { reference, reach }, None)
             .await
     }
 
@@ -532,23 +534,128 @@ impl Reader {
         filter: &Filter,
     ) -> Result<Reading> {
         let access = Access { scope, filter };
-        self.read_reach(reference, Reach { before, after }, Some(access))
+        let reach = Reach { before, after };
+        self.read_target(Target::Passage { reference, reach }, Some(access))
             .await
     }
 
-    async fn read_reach(
+    /// The file with this key as the index holds it in this snapshot: its status and why it
+    /// is not ready, its display name, media type, modified time and attributes. Like
+    /// [`Reader::read`], it checks no scope or filter; [`Reader::file_within`] does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FileOutsideData`] for a key that is not a whole object key inside the
+    /// data location, [`Error::ShardUnread`] if the file's shard stays unreadable after a
+    /// refresh, and an error if the file table cannot be read.
+    pub async fn file(&self, key: &str) -> Result<Option<FileEntry>> {
+        self.file_entry(key, None).await
+    }
+
+    /// The file with this key, as [`Reader::file`] gives it, only if it is in `scope` and
+    /// passes `filter`; `None` otherwise, as for a file the index does not hold.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Reader::file`].
+    pub async fn file_within(
         &self,
-        reference: &SourceRef,
-        reach: Reach,
-        access: Option<Access<'_>>,
-    ) -> Result<Reading> {
+        key: &str,
+        scope: &Scope,
+        filter: &Filter,
+    ) -> Result<Option<FileEntry>> {
+        self.file_entry(key, Some(Access { scope, filter })).await
+    }
+
+    async fn file_entry(&self, key: &str, access: Option<Access<'_>>) -> Result<Option<FileEntry>> {
+        read::file_inside(&self.data, key)?;
+        if access.is_some_and(|access| !access.scope.contains(key)) {
+            return Ok(None);
+        }
         let (mut manifest, cache) = self.snapshot_for_call(None).await?;
         let mut loader = Loader::new(&self.index, &self.tables, cache);
         let mut refreshed = false;
         loop {
-            match read::run(self.sources(&loader), &manifest, reference, reach, access).await {
+            let Some((shard_id, shard)) = manifest.shard_for(key) else {
+                return Ok(None);
+            };
+            match loader.files(shard).await {
+                Ok(files) => {
+                    let entry = files.get(key).filter(|entry| {
+                        access.is_none_or(|access| {
+                            access.filter.matches(entry.attributes(), entry.modified())
+                        })
+                    });
+                    return Ok(entry.cloned());
+                }
+                Err(Error::Index(IndexError::MissingSegment { segment })) if !refreshed => {
+                    warn!(segment = %segment, "a segment is missing, so the reader refreshes");
+                    refreshed = true;
+                    self.refresh().await?;
+                    let cache;
+                    (manifest, cache) = self.snapshot();
+                    loader = loader.rebind(cache);
+                }
+                Err(Error::Index(IndexError::MissingSegment { .. })) => {
+                    self.check_index().await?;
+                    return Err(Error::ShardUnread {
+                        shard: shard_id.clone(),
+                    });
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    /// Reads up to `limit` chunks of the file `key` in reading order, starting at its chunk
+    /// at position `first`, counting from 0, so a host can read a whole file page by page
+    /// without a search hit. Past the file's last chunk, the reading holds no chunks, and so
+    /// does a reading of a file with no chunks indexed yet, which [`Reader::file`] tells apart
+    /// by its status. Each call reads the file again: the bytes of its chunks for plain text,
+    /// and the whole file for formats that must be parsed, such as PDF, so fewer, larger
+    /// pages cost less. Like [`Reader::read`], it checks no scope or filter;
+    /// [`Reader::chunks_within`] does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FileOutsideData`] for a key outside the data location,
+    /// [`Error::FileNotInIndex`] for a file the index does not hold, [`Error::StaleRef`] if
+    /// the file has changed since it was indexed, [`Error::ShardUnread`] if the shard's
+    /// segments stay missing after a refresh, and an error if the store or the extractor
+    /// fails.
+    pub async fn chunks(&self, key: &str, first: usize, limit: usize) -> Result<Reading> {
+        self.read_target(Target::File { key, first, limit }, None)
+            .await
+    }
+
+    /// Reads chunks of the file `key`, as [`Reader::chunks`] does, only if the file is in
+    /// `scope` and passes `filter`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FileNotInIndex`] for a file outside `scope` or one that does not pass
+    /// `filter`, as for a file the index does not hold; otherwise as for [`Reader::chunks`].
+    pub async fn chunks_within(
+        &self,
+        key: &str,
+        first: usize,
+        limit: usize,
+        scope: &Scope,
+        filter: &Filter,
+    ) -> Result<Reading> {
+        let access = Access { scope, filter };
+        self.read_target(Target::File { key, first, limit }, Some(access))
+            .await
+    }
+
+    async fn read_target(&self, target: Target<'_>, access: Option<Access<'_>>) -> Result<Reading> {
+        let (mut manifest, cache) = self.snapshot_for_call(None).await?;
+        let mut loader = Loader::new(&self.index, &self.tables, cache);
+        let mut refreshed = false;
+        loop {
+            match read::run(self.sources(&loader), &manifest, target, access).await {
                 Ok(chunks) => {
-                    if let Some((shard, _)) = manifest.shard_for(reference.location().key()) {
+                    if let Some((shard, _)) = manifest.shard_for(target.key()) {
                         self.record(Signal::Read, &[shard]);
                     }
                     return Ok(Reading::new(chunks, loader.counter().usage()));
@@ -563,14 +670,10 @@ impl Reader {
                 }
                 Err(Error::Index(IndexError::MissingSegment { .. })) => {
                     self.check_index().await?;
-                    let shard = manifest
-                        .shard_for(reference.location().key())
-                        .map(|(id, _)| id.clone());
+                    let shard = manifest.shard_for(target.key()).map(|(id, _)| id.clone());
                     return Err(match shard {
                         Some(shard) => Error::ShardUnread { shard },
-                        None => Error::NotInIndex {
-                            reference: reference.clone(),
-                        },
+                        None => target.not_in_index(),
                     });
                 }
                 Err(err) => return Err(err),

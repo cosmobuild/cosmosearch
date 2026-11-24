@@ -22,11 +22,12 @@ use cosmosearch_core::{
     SharedExtractor, SharedHeat, SharedIndex, Signal, SourceRef, Timestamp, Usage,
 };
 use cosmosearch_extract_html::Html;
+use cosmosearch_format::FileStatus;
 use cosmosearch_indexer::{
     AttributeChange, ExtractOutcome, FileChange, FileUpsert, Indexer, PublishOutcome,
 };
 use cosmosearch_lexical::Bm25;
-use cosmosearch_query::{Error, Plugins, Reader, ReaderOptions, SearchHit, SearchRequest};
+use cosmosearch_query::{Error, Plugins, Reader, ReaderOptions, Reading, SearchHit, SearchRequest};
 use cosmosearch_store::{
     CreateOutcome, DataStore, Fault, FaultStore, IndexHandle, MemoryStore, MetadataStore,
     ObjectKey, Op, WriteStore,
@@ -1096,4 +1097,94 @@ async fn index_kinds_are_searched_at_the_same_time() {
         2,
         "each kind waits for the other, so both report only when searched together"
     );
+}
+
+#[tokio::test]
+async fn a_file_reads_page_by_page_in_reading_order_without_a_hit() {
+    let f = Fixture::new().await;
+    let indexed = f
+        .index(&[
+            (
+                "docs/guide.md",
+                b"# Refunds\n\nRefunds take five days.\n\n# Returns\n\nReturns need a label.\n\n# Fees\n\nNo fees apply.\n",
+            ),
+            ("docs/b/notes.txt", b"other notes"),
+        ])
+        .await;
+    let expected: Vec<String> = indexed
+        .iter()
+        .filter(|chunk| chunk.source().location().key() == "docs/guide.md")
+        .map(|chunk| chunk.text().to_owned())
+        .collect();
+    assert!(expected.len() >= 3, "{expected:?}");
+    let texts = |reading: Reading| -> Vec<String> {
+        reading
+            .chunks()
+            .iter()
+            .map(|chunk| chunk.text().to_owned())
+            .collect()
+    };
+
+    let mut paged = Vec::new();
+    let mut first = 0;
+    loop {
+        let page = texts(f.reader.chunks("docs/guide.md", first, 2).await.unwrap());
+        if page.is_empty() {
+            break;
+        }
+        first += page.len();
+        paged.extend(page);
+    }
+    assert_eq!(paged, expected);
+    let all = f
+        .reader
+        .chunks("docs/guide.md", 0, usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(all.chunks()[1].source().location().key(), "docs/guide.md");
+    assert_eq!(texts(all), expected);
+
+    let entry = f.reader.file("docs/guide.md").await.unwrap().unwrap();
+    assert_eq!(entry.status(), FileStatus::Ready);
+    assert_eq!(f.reader.file("docs/none.txt").await.unwrap(), None);
+    let err = f.reader.file("elsewhere/x.txt").await.unwrap_err();
+    assert!(matches!(err, Error::FileOutsideData { .. }), "{err}");
+    let err = f.reader.chunks("docs/none.txt", 0, 1).await.unwrap_err();
+    assert!(matches!(err, Error::FileNotInIndex { .. }), "{err}");
+
+    let own = Scope::prefix("docs/guide");
+    let read = f
+        .reader
+        .chunks_within("docs/guide.md", 0, 1, &own, &Filter::new())
+        .await
+        .unwrap();
+    assert_eq!(read.chunks().len(), 1);
+    let other = Scope::prefix("docs/b/");
+    let err = f
+        .reader
+        .chunks_within("docs/guide.md", 0, 1, &other, &Filter::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::FileNotInIndex { .. }), "{err}");
+
+    let any = Filter::new();
+    let within = f.reader.file_within("docs/guide.md", &own, &any).await;
+    assert_eq!(within.unwrap().unwrap().status(), FileStatus::Ready);
+    let outside = f.reader.file_within("docs/guide.md", &other, &any).await;
+    assert_eq!(outside.unwrap(), None);
+    let owned = Filter::new().equals("owner", "x");
+    let unmatched = f.reader.file_within("docs/guide.md", &own, &owned).await;
+    assert_eq!(unmatched.unwrap(), None);
+    let missing = f.reader.file_within("docs/none.txt", &own, &any).await;
+    assert_eq!(missing.unwrap(), None);
+    let err = f
+        .reader
+        .file_within("elsewhere/x.txt", &own, &any)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::FileOutsideData { .. }), "{err}");
+
+    f.put("docs/guide.md", b"# Changed\n\nNew text.\n").await;
+    let err = f.reader.chunks("docs/guide.md", 0, 1).await.unwrap_err();
+    assert!(matches!(err, Error::StaleRef { .. }), "{err}");
 }

@@ -137,9 +137,10 @@ None are on by default.
   local filesystem. In a local folder, a file's ETag comes from its inode, size and
   modification time, so change files by writing a new file and renaming it over the old
   one, not by rewriting them in place.
-- **Reading is not scoped.** `read` and `expand` return any indexed passage whose ref they
-  are given, whatever scope or filter the search had. If refs come from your users, use
-  `read_within` and `expand_within` with the scope and filter of that user's searches.
+- **Reading is not scoped.** `read`, `expand`, `file` and `chunks` return any indexed
+  passage or file whose ref or key they are given, whatever scope or filter the search had.
+  If refs or keys come from your users, use `read_within`, `expand_within`, `file_within`
+  and `chunks_within` with the scope and filter of that user's searches.
 - **No "not found" answer.** A search with no results ends `inconclusive`, never "absent":
   it tells you what it searched, but it does not claim that no answer exists.
 

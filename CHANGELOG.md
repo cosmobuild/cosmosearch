@@ -36,6 +36,12 @@ All notable changes are listed here. The format follows
 - `SearchHit::display_name` gives the name the host gave the hit's file, and
   `SearchHit::list_ranks` gives the hit's rank in each index kind's list, beside
   `list_scores`, so a host can see why fusion placed it.
+- `Engine::file` gives a file as the index holds it, with its status and why it is not
+  ready, without the indexer, and `Engine::file_within` does so only within a scope and
+  filter. `Engine::chunks` reads a file's chunks in reading order, page by page, without a
+  search hit, and `Engine::chunks_within` does so only within a scope and filter. The same
+  calls are on `Reader`. `FileEntry`, `FileStatus` and `FileReason` are exported at the
+  crate root.
 
 ### Changed
 

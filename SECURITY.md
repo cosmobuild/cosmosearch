@@ -46,10 +46,12 @@ them when it creates an index. Reads rely on `If-Match` to pin a file's version.
 ignored `If-Match` would return changed bytes, and that is not checked yet.
 
 **Access control.** cosmosearch has no users or permissions. Scopes and filters narrow a
-search, but `read` and `expand` return any indexed passage whose ref they are given. If refs
-come from your users, call `read_within` and `expand_within` with the same scope and filter
-you give that user's searches, or check that the user may access the ref's file yourself. A
-search returns at most 1,000 hits; query length is not limited, so bound it yourself.
+search, but `read` and `expand` return any indexed passage whose ref they are given, and
+`file` and `chunks` describe and read any indexed file whose key they are given. If refs or
+keys come from your users, call `read_within`, `expand_within`, `file_within` and
+`chunks_within` with the same scope and filter you give that user's searches, or check that
+the user may access the file yourself. A search returns at most 1,000 hits; query length is
+not limited, so bound it yourself.
 
 **Local files.** The local filesystem backend follows symbolic links, so a link inside a
 data folder brings its target's files into the index. Only index folders whose links you

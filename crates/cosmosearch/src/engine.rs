@@ -8,6 +8,7 @@ use cosmosearch_core::{
     SegmentCache, SharedCache, SharedExtractor, SharedHeat, SharedIndex, SharedPassages,
     SharedReranker, SharedResults, SourceRef,
 };
+use cosmosearch_format::FileEntry;
 use cosmosearch_query::{Plugins, Reader, ReaderOptions, Reading, SearchRequest, SearchResults};
 use cosmosearch_store::{DataStore, MetadataStore};
 
@@ -138,6 +139,65 @@ impl Engine {
     ) -> Result<Reading> {
         self.reader
             .expand_within(reference, before, after, scope, filter)
+            .await
+    }
+
+    /// The file with this key as the index holds it: its status and why it is not ready, its
+    /// display name, media type, modified time and attributes. Access is not checked, as for
+    /// [`Engine::read`]; [`Engine::file_within`] checks it.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Reader::file`].
+    pub async fn file(&self, key: &str) -> Result<Option<FileEntry>> {
+        self.reader.file(key).await
+    }
+
+    /// The file with this key, as [`Engine::file`] gives it, only if it is in `scope` and
+    /// passes `filter`; `None` otherwise, as for a file the index does not hold.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Reader::file_within`].
+    pub async fn file_within(
+        &self,
+        key: &str,
+        scope: &Scope,
+        filter: &Filter,
+    ) -> Result<Option<FileEntry>> {
+        self.reader.file_within(key, scope, filter).await
+    }
+
+    /// Reads up to `limit` chunks of the file `key` in reading order, from its chunk at
+    /// position `first`, counting from 0, so a whole file can be read page by page without a
+    /// search hit. Past the last chunk, the reading holds none, as it does for a file with no
+    /// chunks indexed yet; [`Engine::file`] gives its status. Each call reads the file again,
+    /// the whole of it for formats that must be parsed, such as PDF. Access is not checked, as
+    /// for [`Engine::read`].
+    ///
+    /// # Errors
+    ///
+    /// As for [`Reader::chunks`].
+    pub async fn chunks(&self, key: &str, first: usize, limit: usize) -> Result<Reading> {
+        self.reader.chunks(key, first, limit).await
+    }
+
+    /// Reads chunks of the file `key`, as [`Engine::chunks`] does, only if the file is in
+    /// `scope` and passes `filter`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Reader::chunks_within`].
+    pub async fn chunks_within(
+        &self,
+        key: &str,
+        first: usize,
+        limit: usize,
+        scope: &Scope,
+        filter: &Filter,
+    ) -> Result<Reading> {
+        self.reader
+            .chunks_within(key, first, limit, scope, filter)
             .await
     }
 
