@@ -53,8 +53,8 @@ pub use cosmosearch_core::{
 };
 pub use cosmosearch_format::{FileEntry, FileReason, FileStatus};
 pub use cosmosearch_query::{
-    Coverage, Error, Plugin, Reading, RerankFailure, Reranking, Result, SearchHit, SearchRequest,
-    SearchResults, Snippet,
+    Boost, Coverage, Error, Plugin, Reading, RerankFailure, Reranking, Result, SearchHit,
+    SearchRequest, SearchResults, Snippet,
 };
 pub use cosmosearch_store::{CreateOutcome, DataStore, MetadataStore};
 pub use engine::{Engine, EngineBuilder};

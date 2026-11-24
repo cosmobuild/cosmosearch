@@ -267,13 +267,17 @@ flowchart LR
 4. **Fuse.** The ranked lists are merged with reciprocal rank fusion, which needs no
    comparable scores. A list counts only for the files it covers, so a file without vectors
    isn't penalised for missing from the vector list. You can set the fusion constant and a
-   weight per index kind.
+   weight per index kind. A search with boosts fuses twice as many candidates and moves up
+   those whose file passes a filter, or by how recently it was modified: a candidate stands
+   at its rank divided by its boost multiplier. Boosts never add a candidate.
 5. **Rerank.** If you set a reranker, it rescores the top 20 fused results (or a shortlist
-   size you choose). If it fails, the results keep their fused order and the response says
-   reranking failed.
-6. **Return** the hits, each with its ref, score and heading path, plus the search's status,
-   coverage and usage. With snippets turned on, the best hits also carry their passage text
-   and the positions of the query's words in it.
+   size you choose). Boosts then place the reranked hits again by their rerank ranks, so a
+   boost counts as much with a reranker as without one. If the reranker fails, the results
+   keep their fused order and the response says reranking failed.
+6. **Return** the hits, each with its ref, score, boost multiplier, heading path, file
+   display name and rank in each list, plus the search's status, coverage and usage. With
+   snippets turned on, the best hits also carry their passage text and the positions of the
+   query's words in it.
 
 **Status and coverage.** A search ends `found` if it returned results and `inconclusive` if
 it didn't. Neither is a claim about whether an answer exists. **Coverage** says what the

@@ -45,6 +45,12 @@ All notable changes are listed here. The format follows
 - `Query::with_every_word` asks keyword search for passages that hold every word outside
   quotes, instead of any of them; exact phrases are required either way. The result cache
   keeps the two modes apart.
+- `SearchRequest::boost` with `Boost::matching(filter, weight)` or
+  `Boost::recency(now, half_life, weight)` moves up the candidates whose file passes a
+  filter, or by how recently it was modified, with a reranker or without one. With a weight
+  of 1, a qualifying candidate counts as ranked twice as high, and `SearchHit::boost` gives
+  each hit's multiplier. A boost never adds a candidate, and the result cache keys on it.
+  A weight below zero or not finite fails with `Error::InvalidBoost`.
 
 ### Changed
 

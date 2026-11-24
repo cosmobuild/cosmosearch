@@ -68,6 +68,16 @@ pub enum Error {
         value: f64,
     },
 
+    /// A boost's weight is not finite and at least zero, or a recency boost's half-life is
+    /// zero.
+    #[error(
+        "a boost's weight must be finite and at least zero, and its half-life above zero; the weight is {weight}"
+    )]
+    InvalidBoost {
+        /// The weight given.
+        weight: f64,
+    },
+
     /// The request asks for more hits than [`SearchRequest::MAX_LIMIT`].
     ///
     /// [`SearchRequest::MAX_LIMIT`]: crate::SearchRequest::MAX_LIMIT

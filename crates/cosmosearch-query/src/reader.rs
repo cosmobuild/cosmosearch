@@ -12,6 +12,7 @@ use cosmosearch_store::{DataStore, IndexHandle, MetadataStore, OpenState};
 use tokio::time;
 use tracing::warn;
 
+use crate::boost;
 use crate::cached::{CacheView, CachedFiles};
 use crate::deadline;
 use crate::fuse::Fusion;
@@ -423,8 +424,9 @@ impl Reader {
             .filter(|_| limit > 0 && self.options.shortlist > 0)
     }
 
-    /// Reranks `hits`, keeps the best `limit` and gives them snippets, by `deadline`. Returns
-    /// the hits, how reranking went, the tokens it read and whether all of it was done in time.
+    /// Reranks `hits`, places the reranked ones again by their boosts, keeps the best `limit`
+    /// and gives them snippets, by `deadline`. Returns the hits, how reranking went, the tokens
+    /// it read and whether all of it was done in time.
     async fn rank(
         &self,
         passages: &mut Passages<'_>,
@@ -440,6 +442,15 @@ impl Reader {
             }
             None => (hits, Reranking::Off, Usage::new()),
         };
+        let reranked = hits
+            .iter()
+            .take_while(|hit| hit.rerank_score().is_some())
+            .count();
+        if reranked > 1 {
+            let rest = hits.split_off(reranked);
+            hits = boost::place(hits, SearchHit::boost);
+            hits.extend(rest);
+        }
         hits.truncate(limit);
         let snippets = self.add_snippets(passages, query, &mut hits);
         let snipped = deadline::within(deadline, snippets).await.is_some();
@@ -774,7 +785,11 @@ impl Reader {
             .number(count(limit))
             .number(count(self.options.snippet_files))
             .number(self.options.fusion.k().to_bits())
-            .number(count(kinds.len()));
+            .number(count(request.boosts.len()));
+        for boost in &request.boosts {
+            identity = boost.add_to(identity);
+        }
+        identity = identity.number(count(kinds.len()));
         for kind in kinds {
             identity = identity
                 .text(kind.as_str())

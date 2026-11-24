@@ -10,10 +10,11 @@ use cosmosearch_core::{
 use cosmosearch_format::{ChunkTable, FileEntry, FileTable};
 use futures_util::{StreamExt, TryStreamExt, future, stream};
 
+use crate::boost;
 use crate::coverage::Counts;
 use crate::fuse::{self, Fusion};
 use crate::tables::{self, Loader};
-use crate::{Coverage, Plugins, Reranking, Result, SearchRequest, Snippet};
+use crate::{Boost, Coverage, Plugins, Reranking, Result, SearchRequest, Snippet};
 
 const LOAD_CONCURRENCY: usize = 8;
 
@@ -36,6 +37,7 @@ pub struct SearchHit {
     score: f32,
     list_scores: Vec<(IndexKind, f32)>,
     list_ranks: Vec<(IndexKind, u32)>,
+    boost: f64,
     rerank_score: Option<f32>,
     heading_path: Vec<String>,
     display_name: Option<String>,
@@ -49,7 +51,8 @@ impl SearchHit {
     }
 
     /// The reciprocal rank fusion score over the lists of the index kinds searched, higher
-    /// being better. It orders hits but means nothing on its own.
+    /// being better. It means nothing on its own, and with boosts, [`SearchHit::boost`] also
+    /// decides where the hit stands.
     pub fn score(&self) -> f32 {
         self.score
     }
@@ -68,13 +71,21 @@ impl SearchHit {
         &self.list_ranks
     }
 
+    /// What the search's boosts multiplied together give the hit's file, 1 when none
+    /// applies: the hit stands at its rank divided by it, among the fused candidates and again
+    /// among the reranked hits. See [`crate::Boost`].
+    pub fn boost(&self) -> f64 {
+        self.boost
+    }
+
     /// The name the host gave the passage's file, if any.
     pub fn display_name(&self) -> Option<&str> {
         self.display_name.as_deref()
     }
 
-    /// The reranker's score, for a hit in the shortlist whose passage could be read. Reranked
-    /// hits come first, ordered by it, higher being better.
+    /// The reranker's score, for a hit in the shortlist whose passage could be read, higher
+    /// being better. Reranked hits come first, ordered by it, or with boosts, by their rank by
+    /// it divided by [`SearchHit::boost`].
     pub fn rerank_score(&self) -> Option<f32> {
         self.rerank_score
     }
@@ -115,6 +126,7 @@ impl fmt::Debug for SearchHit {
             .field("score", &self.score)
             .field("list_scores", &self.list_scores)
             .field("list_ranks", &self.list_ranks)
+            .field("boost", &self.boost)
             .field("rerank_score", &self.rerank_score)
             .field("headings", &self.heading_path.len())
             .field(
@@ -406,8 +418,10 @@ pub(crate) async fn run(
         query,
         scope,
         filter,
+        boosts,
         ..
     } = request;
+    let pool = boost::pool(limit, boosts);
     let shards: Vec<_> = manifest
         .shards()
         .iter()
@@ -444,7 +458,7 @@ pub(crate) async fn run(
         Some(async move {
             let found = index
                 .get()
-                .search(loader.source(), &segments, allowed, query, depth(limit))
+                .search(loader.source(), &segments, allowed, query, depth(pool))
                 .await?;
             let of_kind: Vec<&Searchable> = segments
                 .iter()
@@ -480,25 +494,35 @@ pub(crate) async fn run(
         lists.push((weight, list));
     }
 
-    let mut found = Vec::with_capacity(limit.min(passages.len()));
+    let mut found = Vec::with_capacity(pool.min(passages.len()));
     let covers = |list: usize, key: &ChunkKey| {
         let (Some(segments), Some(place)) = (kinds_segments.get(list), places.get(key)) else {
             return false;
         };
         segments.iter().any(|segment| segment.holds(place))
     };
-    for (key, score) in fuse::fuse(&lists, fusion.k(), limit, covers) {
+    for (key, score) in fuse::fuse(&lists, fusion.k(), pool, covers) {
         if let Some(mut passage) = passages.remove(&key) {
             passage.score = score;
+            passage.boost = multiplier(boosts, places.get(&key));
             places_in_lists.place(&key, &mut passage);
             found.push(passage);
         }
     }
     Ok(Searched {
-        hits: found,
+        hits: boost::choose(found, boosts, limit),
         covered,
         counts,
     })
+}
+
+/// What `boosts` multiplied together give the file of the passage at `place`.
+fn multiplier(boosts: &[Boost], place: Option<&Place>) -> f64 {
+    place
+        .and_then(|place| place.table.by_ordinal(place.file_ordinal))
+        .map_or(1.0, |file| {
+            boosts.iter().map(|boost| boost.multiplier(file)).product()
+        })
 }
 
 /// Where each passage stood in each index kind's list: its score and its rank among the
@@ -709,6 +733,7 @@ fn resolve(
                 score: hit.score(),
                 list_scores: Vec::new(),
                 list_ranks: Vec::new(),
+                boost: 1.0,
                 rerank_score: None,
                 heading_path: record.heading_path().to_vec(),
                 display_name: holder

@@ -6,11 +6,12 @@ use async_trait::async_trait;
 use cosmosearch_core::{
     AllowedRows, Built, CachedResults, Chunk, ExtractLimits, FileSource, Filter, Hits, Index,
     IndexError, IndexKind, Level, Query, ResultCache, Scope, SearchKey, SegmentEntry, SegmentId,
-    SegmentSource, ShardId, SharedHeat, SharedIndex, SharedReranker, SharedResults, Signal, Usage,
+    SegmentSource, ShardId, SharedHeat, SharedIndex, SharedReranker, SharedResults, Signal,
+    Timestamp, Usage,
 };
 use cosmosearch_lexical::Bm25;
 use cosmosearch_query::{
-    Error, Plugins, Reader, ReaderOptions, Reranking, SearchRequest, SearchResults,
+    Boost, Error, Plugins, Reader, ReaderOptions, Reranking, SearchRequest, SearchResults,
 };
 
 use cosmosearch_store::CreateOutcome;
@@ -124,7 +125,22 @@ async fn a_repeated_search_reads_nothing_and_still_records_heat() {
     assert!(reader.search(&scoped).await.unwrap().cached());
     let exact = SearchRequest::new(Query::new("refund").with_exact_phrases());
     assert!(!reader.search(&exact).await.unwrap().cached());
-    assert_eq!(kept.len(), 6);
+    let every = SearchRequest::new(Query::new("refund").with_every_word());
+    assert!(!reader.search(&every).await.unwrap().cached());
+    let boosted = |weight| {
+        SearchRequest::new(Query::new("refund")).boost(Boost::matching(legal.clone(), weight))
+    };
+    assert!(!reader.search(&boosted(1.0)).await.unwrap().cached());
+    assert!(!reader.search(&boosted(2.0)).await.unwrap().cached());
+    assert!(reader.search(&boosted(1.0)).await.unwrap().cached());
+    let now = Timestamp::from_millis(5);
+    let recent = SearchRequest::new(Query::new("refund")).boost(Boost::recency(
+        now,
+        Duration::from_secs(60),
+        1.0,
+    ));
+    assert!(!reader.search(&recent).await.unwrap().cached());
+    assert_eq!(kept.len(), 10);
 }
 
 #[tokio::test]

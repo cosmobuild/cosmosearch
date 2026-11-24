@@ -27,7 +27,9 @@ use cosmosearch_indexer::{
     AttributeChange, ExtractOutcome, FileChange, FileUpsert, Indexer, PublishOutcome,
 };
 use cosmosearch_lexical::Bm25;
-use cosmosearch_query::{Error, Plugins, Reader, ReaderOptions, Reading, SearchHit, SearchRequest};
+use cosmosearch_query::{
+    Boost, Error, Plugins, Reader, ReaderOptions, Reading, SearchHit, SearchRequest, SearchResults,
+};
 use cosmosearch_store::{
     CreateOutcome, DataStore, Fault, FaultStore, IndexHandle, MemoryStore, MetadataStore,
     ObjectKey, Op, WriteStore,
@@ -1187,4 +1189,56 @@ async fn a_file_reads_page_by_page_in_reading_order_without_a_hit() {
     f.put("docs/guide.md", b"# Changed\n\nNew text.\n").await;
     let err = f.reader.chunks("docs/guide.md", 0, 1).await.unwrap_err();
     assert!(matches!(err, Error::StaleRef { .. }), "{err}");
+}
+
+#[tokio::test]
+async fn a_boost_reorders_the_candidates_and_never_adds_one() {
+    let f = Fixture::new().await;
+    f.index(&[
+        ("docs/a.txt", b"refund refund policy"),
+        ("docs/b.txt", b"refund rules"),
+        ("docs/c.txt", b"travel rules"),
+    ])
+    .await;
+    let change = AttributeChange::new("docs/b.txt")
+        .attribute("owner", AttributeValue::One("legal".to_owned()));
+    f.indexer
+        .apply(vec![FileChange::Attributes(change)])
+        .await
+        .unwrap();
+    f.reader.refresh().await.unwrap();
+    let keys = |results: SearchResults| -> Vec<String> {
+        results
+            .hits()
+            .iter()
+            .map(|hit| hit.source().location().key().to_owned())
+            .collect()
+    };
+    let plain = SearchRequest::new(Query::new("refund"));
+    assert_eq!(
+        keys(f.reader.search(&plain).await.unwrap()),
+        ["docs/a.txt", "docs/b.txt"]
+    );
+    let legal = Filter::new().equals("owner", "legal");
+    let level = plain.clone().boost(Boost::matching(legal.clone(), 1.0));
+    assert_eq!(
+        keys(f.reader.search(&level).await.unwrap()),
+        ["docs/a.txt", "docs/b.txt"]
+    );
+    let boosted = plain.clone().boost(Boost::matching(legal.clone(), 2.0));
+    assert_eq!(
+        keys(f.reader.search(&boosted).await.unwrap()),
+        ["docs/b.txt", "docs/a.txt"]
+    );
+    let none = plain.clone().boost(Boost::matching(legal, 0.0));
+    assert_eq!(
+        keys(f.reader.search(&none).await.unwrap()),
+        ["docs/a.txt", "docs/b.txt"]
+    );
+    let travel = plain.boost(Boost::matching(Filter::new().equals("owner", "x"), 5.0));
+    assert_eq!(keys(f.reader.search(&travel).await.unwrap()).len(), 2);
+
+    let bad = SearchRequest::new(Query::new("refund")).boost(Boost::matching(Filter::new(), -1.0));
+    let err = f.reader.search(&bad).await.unwrap_err();
+    assert!(matches!(err, Error::InvalidBoost { .. }), "{err}");
 }

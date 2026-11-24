@@ -28,6 +28,7 @@
 
 #![warn(clippy::arithmetic_side_effects)]
 
+mod boost;
 mod cached;
 mod coverage;
 mod deadline;
@@ -43,6 +44,7 @@ mod search;
 mod snippet;
 mod tables;
 
+pub use boost::Boost;
 pub use coverage::Coverage;
 pub use error::{Error, Plugin, Result};
 pub use plugins::Plugins;
