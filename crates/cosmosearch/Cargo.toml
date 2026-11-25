@@ -28,7 +28,7 @@ pdf = ["dep:cosmosearch-extract-pdf"]
 embed-http = ["dep:cosmosearch-http", "cosmosearch-http/embed"]
 embed-local = ["dep:cosmosearch-embed-local"]
 heat = ["dep:cosmosearch-heat"]
-indexer = ["dep:cosmosearch-format", "dep:cosmosearch-indexer", "dep:futures-util"]
+indexer = ["dep:cosmosearch-indexer", "dep:futures-util"]
 lexical = ["dep:cosmosearch-lexical"]
 rerank-http = ["dep:cosmosearch-http", "cosmosearch-http/rerank"]
 rerank-local = ["dep:cosmosearch-rerank-local"]
@@ -44,7 +44,7 @@ cosmosearch-extract-docx = { workspace = true, optional = true }
 cosmosearch-extract-html = { workspace = true, optional = true }
 cosmosearch-extract-json = { workspace = true, optional = true }
 cosmosearch-extract-pdf = { workspace = true, optional = true }
-cosmosearch-format = { workspace = true, optional = true }
+cosmosearch-format.workspace = true
 cosmosearch-heat = { workspace = true, optional = true }
 cosmosearch-http = { workspace = true, optional = true }
 cosmosearch-indexer = { workspace = true, optional = true }

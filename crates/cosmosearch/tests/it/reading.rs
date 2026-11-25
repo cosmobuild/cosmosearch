@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use cosmosearch::{
-    CreateOutcome, DataStore, Engine, Error, FileSource, MetadataStore, Query, RerankFailure,
-    Reranking, SearchHit, SearchRequest, SearchResults, SourceRef,
+    CreateOutcome, DataStore, Engine, Error, FileSource, Filter, MetadataStore, Query,
+    RerankFailure, Reranking, Scope, SearchHit, SearchRequest, SearchResults, SourceRef,
     core::{RerankError, RerankScores, Reranker, RerankerIdentity},
     index::{
         Extractors, FileChange, FileStatus, FileUpsert, Indexer, PublishOutcome, index_pending,
@@ -409,6 +409,30 @@ async fn a_swept_segment_never_crashes_a_search_and_its_shard_is_reported_unread
     let err = fresh.read(&hit_in_a).await.unwrap_err();
     assert!(matches!(err, Error::ShardUnread { .. }), "{err}");
     assert_eq!(keys(&search(&engine, "rules").await), ["docs/z.txt"]);
+}
+
+#[tokio::test]
+async fn a_file_whose_table_is_swept_is_reported_unread() {
+    let f = Fixture::new().await;
+    f.index(&[("docs/a.txt", b"refund words")]).await;
+    let head = f.index.head().await.unwrap().unwrap();
+    let table = head
+        .shards()
+        .values()
+        .flat_map(ShardEntry::segments)
+        .find(|segment| segment.level() == Level::L0)
+        .unwrap();
+    f.sweep(table).await;
+
+    let fresh = f.engine().await;
+    let err = fresh.file("docs/a.txt").await.unwrap_err();
+    assert!(matches!(err, Error::ShardUnread { .. }), "{err}");
+    let all = Scope::all();
+    let err = fresh
+        .file_within("docs/a.txt", &all, &Filter::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::ShardUnread { .. }), "{err}");
 }
 
 #[tokio::test]

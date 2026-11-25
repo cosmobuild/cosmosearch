@@ -68,6 +68,16 @@ pub enum Error {
         value: f64,
     },
 
+    /// A boost's weight is not finite and at least zero, or a recency boost's half-life is
+    /// zero.
+    #[error(
+        "a boost's weight must be finite and at least zero, and its half-life above zero; the weight is {weight}"
+    )]
+    InvalidBoost {
+        /// The weight given.
+        weight: f64,
+    },
+
     /// The request asks for more hits than [`SearchRequest::MAX_LIMIT`].
     ///
     /// [`SearchRequest::MAX_LIMIT`]: crate::SearchRequest::MAX_LIMIT
@@ -106,6 +116,20 @@ pub enum Error {
     ScopeOutsideData {
         /// The prefix.
         prefix: String,
+    },
+
+    /// A key names no whole object key inside the data location.
+    #[error("the key `{key}` is outside the data location")]
+    FileOutsideData {
+        /// The key.
+        key: String,
+    },
+
+    /// A key names a file the index does not hold.
+    #[error("the file `{key}` is not in the index")]
+    FileNotInIndex {
+        /// The key.
+        key: String,
     },
 
     /// A ref points at a file the index does not hold.

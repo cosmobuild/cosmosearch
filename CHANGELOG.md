@@ -27,16 +27,36 @@ All notable changes are listed here. The format follows
 - `Bm25::stemmed(Language)` builds a keyword index that reduces words to their stems in one
   of 18 languages, so a search for `refund` also finds `refunds` and `refunded`. Its kind,
   such as `bm25-stem-en`, names the language, so a plug-in searches only the segments built
-  the same way. `Bm25::new` does not stem, as before.
+  the same way.
 - Keyword search matches a file's name: its display name and the last part of its key
-  without the extension, on the first chunk of the file and with half the weight of the
-  text. Words in quotes still match only the text. A display name changed through
-  `FileChange::Attributes` is matched once the file is indexed again, for example after a
-  retry.
+  without the extension, on the first chunk of the file and with the same weight as the
+  text, unless `Bm25::name_weight` sets another weight. Words in quotes still match only
+  the text. A display name changed through `FileChange::Attributes` is matched once the
+  file is indexed again, for example after a retry.
+- `SearchHit::display_name` gives the name the host gave the hit's file, and
+  `SearchHit::list_ranks` gives the hit's rank in each index kind's list, beside
+  `list_scores`, so a host can see why fusion placed it.
+- `Engine::file` gives a file as the index holds it, with its status and why it is not
+  ready, without the indexer, and `Engine::file_within` does so only within a scope and
+  filter. `Engine::chunks` reads a file's chunks in reading order, page by page, without a
+  search hit, and `Engine::chunks_within` does so only within a scope and filter. The same
+  calls are on `Reader`. `FileEntry`, `FileStatus` and `FileReason` are exported at the
+  crate root.
+- `Query::with_every_word` asks keyword search for passages that hold every word outside
+  quotes, instead of any of them; exact phrases are required either way. The result cache
+  keeps the two modes apart.
+- `SearchRequest::boost` with `Boost::matching(filter, weight)` or
+  `Boost::recency(now, half_life, weight)` moves up the candidates whose file passes a
+  filter, or by how recently it was modified, with a reranker or without one. With a weight
+  of 1, a qualifying candidate counts as ranked twice as high, and `SearchHit::boost` gives
+  each hit's multiplier. A boost never adds a candidate, and the result cache keys on it.
+  A weight below zero or not finite fails with `Error::InvalidBoost`.
 
 ### Changed
 
 - The file table format changed, so indexes built by 0.1 must be built again.
+- `Bm25::new` stems English words, with the kind `bm25-stem-en`. `Bm25::plain` keeps the
+  behaviour of 0.1, for text such as code or logs.
 - `Filter::matches` also takes the file's modified time.
 - `Extractors::for_file` replaces `Extractors::for_key` and takes the file's media type.
 - A PDF that the decoded-bytes check cannot load fails as malformed, even where the parser

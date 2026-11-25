@@ -163,6 +163,7 @@ impl Built {
 pub struct Query {
     text: String,
     exact_phrases: bool,
+    every_word: bool,
 }
 
 impl Query {
@@ -172,6 +173,7 @@ impl Query {
         Query {
             text: text.into(),
             exact_phrases: false,
+            every_word: false,
         }
     }
 
@@ -184,6 +186,14 @@ impl Query {
         self
     }
 
+    /// The same query asking keyword plug-ins, such as BM25, for passages that hold every
+    /// word outside quotes, instead of any of them. Exact phrases are required either way.
+    #[must_use]
+    pub fn with_every_word(mut self) -> Self {
+        self.every_word = true;
+        self
+    }
+
     /// The text.
     pub fn text(&self) -> &str {
         &self.text
@@ -193,6 +203,11 @@ impl Query {
     pub fn exact_phrases(&self) -> bool {
         self.exact_phrases
     }
+
+    /// Whether keyword plug-ins match passages holding every word, instead of any word.
+    pub fn every_word(&self) -> bool {
+        self.every_word
+    }
 }
 
 impl fmt::Debug for Query {
@@ -200,6 +215,7 @@ impl fmt::Debug for Query {
         f.debug_struct("Query")
             .field("text_bytes", &self.text.len())
             .field("exact_phrases", &self.exact_phrases)
+            .field("every_word", &self.every_word)
             .finish()
     }
 }

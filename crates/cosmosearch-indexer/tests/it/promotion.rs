@@ -194,7 +194,7 @@ async fn a_promotion_is_superseded_when_a_segment_it_replaces_is_rebuilt() {
 
     f.send(vec![remove("docs/a.txt")]).await;
     for rebuild in f.indexer.plan_rebuilds().await.unwrap() {
-        let plugin = if rebuild.kind().as_str() == "bm25" {
+        let plugin = if rebuild.kind() == bm25().get().kind() {
             bm25()
         } else {
             index.clone()

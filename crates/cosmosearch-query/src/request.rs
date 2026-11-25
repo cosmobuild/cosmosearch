@@ -1,6 +1,6 @@
 use cosmosearch_core::{Budget, Filter, Query, Scope};
 
-use crate::{Error, Result};
+use crate::{Boost, Error, Result};
 
 /// How many hits a search returns unless set.
 const DEFAULT_LIMIT: usize = 10;
@@ -14,6 +14,7 @@ pub struct SearchRequest {
     pub(crate) filter: Filter,
     pub(crate) limit: usize,
     pub(crate) budget: Budget,
+    pub(crate) boosts: Vec<Boost>,
 }
 
 impl SearchRequest {
@@ -31,6 +32,7 @@ impl SearchRequest {
             filter: Filter::new(),
             limit: DEFAULT_LIMIT,
             budget: Budget::new(),
+            boosts: Vec::new(),
         }
     }
 
@@ -65,10 +67,18 @@ impl SearchRequest {
         self
     }
 
+    /// Also applies `boost` to the candidates, as [`Boost`] describes. Boosts multiply
+    /// together.
+    #[must_use]
+    pub fn boost(mut self, boost: Boost) -> Self {
+        self.boosts.push(boost);
+        self
+    }
+
     pub(crate) fn check(&self) -> Result<()> {
         if self.limit > Self::MAX_LIMIT {
             return Err(Error::LimitTooLarge { limit: self.limit });
         }
-        Ok(())
+        self.boosts.iter().try_for_each(Boost::check)
     }
 }

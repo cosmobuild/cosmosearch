@@ -22,11 +22,14 @@ use cosmosearch_core::{
     SharedExtractor, SharedHeat, SharedIndex, Signal, SourceRef, Timestamp, Usage,
 };
 use cosmosearch_extract_html::Html;
+use cosmosearch_format::FileStatus;
 use cosmosearch_indexer::{
     AttributeChange, ExtractOutcome, FileChange, FileUpsert, Indexer, PublishOutcome,
 };
 use cosmosearch_lexical::Bm25;
-use cosmosearch_query::{Error, Plugins, Reader, ReaderOptions, SearchHit, SearchRequest};
+use cosmosearch_query::{
+    Boost, Error, Plugins, Reader, ReaderOptions, Reading, SearchHit, SearchRequest, SearchResults,
+};
 use cosmosearch_store::{
     CreateOutcome, DataStore, Fault, FaultStore, IndexHandle, MemoryStore, MetadataStore,
     ObjectKey, Op, WriteStore,
@@ -861,7 +864,7 @@ async fn opening_and_reading_need_the_plugins_that_built_the_index() {
     .unwrap_err();
     assert_eq!(
         err.to_string(),
-        "this index needs plug-ins that were not added: extractor `text-2`, index `bm25`"
+        "this index needs plug-ins that were not added: extractor `text-2`, index `bm25-stem-en`"
     );
 }
 
@@ -915,8 +918,8 @@ async fn lists_of_two_index_kinds_fuse_on_the_passage() {
             .map(|(kind, _)| kind.to_string())
             .collect()
     };
-    assert_eq!(kinds(&hits[0]), ["backwards", "bm25"], "{hits:?}");
-    assert_eq!(kinds(&hits[1]), ["backwards", "bm25"], "{hits:?}");
+    assert_eq!(kinds(&hits[0]), ["backwards", "bm25-stem-en"], "{hits:?}");
+    assert_eq!(kinds(&hits[1]), ["backwards", "bm25-stem-en"], "{hits:?}");
     assert_eq!(kinds(&hits[2]), ["backwards"], "{hits:?}");
     let bm25 = |hit: &SearchHit| hit.list_scores()[1].1;
     let a = hits
@@ -935,6 +938,60 @@ async fn lists_of_two_index_kinds_fuse_on_the_passage() {
     assert_eq!(keys, ["docs/a.txt", "docs/b.txt"]);
     assert!((alone[0].score() - 1.0 / 61.0).abs() < 1e-6, "{alone:?}");
     assert!((alone[1].score() - 1.0 / 62.0).abs() < 1e-6, "{alone:?}");
+    let ranks = |hit: &SearchHit| -> Vec<(String, u32)> {
+        hit.list_ranks()
+            .iter()
+            .map(|(kind, rank)| (kind.to_string(), *rank))
+            .collect()
+    };
+    assert_eq!(ranks(&alone[0]), [("bm25-stem-en".to_owned(), 1)]);
+    assert_eq!(ranks(&alone[1]), [("bm25-stem-en".to_owned(), 2)]);
+    let mut backwards_ranks: Vec<u32> = hits
+        .iter()
+        .map(|hit| {
+            assert_eq!(
+                ranks(hit)
+                    .iter()
+                    .map(|(kind, _)| kind.clone())
+                    .collect::<Vec<_>>(),
+                kinds(hit)
+            );
+            ranks(hit)[0].1
+        })
+        .collect();
+    backwards_ranks.sort_unstable();
+    assert_eq!(backwards_ranks, [1, 2, 3]);
+    let mut bm25_ranks: Vec<u32> = hits[..2].iter().map(|hit| ranks(hit)[1].1).collect();
+    bm25_ranks.sort_unstable();
+    assert_eq!(bm25_ranks, [1, 2]);
+}
+
+#[tokio::test]
+async fn a_hit_carries_the_display_name_of_its_file() {
+    let f = Fixture::new().await;
+    f.index(&[
+        ("docs/a.txt", b"refund policy"),
+        ("docs/b.txt", b"refund rules"),
+    ])
+    .await;
+    let change = AttributeChange::new("docs/b.txt").display_name("Refund rules 2024");
+    f.indexer
+        .apply(vec![FileChange::Attributes(change)])
+        .await
+        .unwrap();
+    f.reader.refresh().await.unwrap();
+    let hits = f.search("refund").await;
+    let names: BTreeMap<&str, Option<&str>> = hits
+        .iter()
+        .map(|hit| (hit.source().location().key(), hit.display_name()))
+        .collect();
+    assert_eq!(
+        names,
+        BTreeMap::from([
+            ("docs/a.txt", None),
+            ("docs/b.txt", Some("Refund rules 2024"))
+        ])
+    );
 }
 
 #[tokio::test]
@@ -1042,4 +1099,146 @@ async fn index_kinds_are_searched_at_the_same_time() {
         2,
         "each kind waits for the other, so both report only when searched together"
     );
+}
+
+#[tokio::test]
+async fn a_file_reads_page_by_page_in_reading_order_without_a_hit() {
+    let f = Fixture::new().await;
+    let indexed = f
+        .index(&[
+            (
+                "docs/guide.md",
+                b"# Refunds\n\nRefunds take five days.\n\n# Returns\n\nReturns need a label.\n\n# Fees\n\nNo fees apply.\n",
+            ),
+            ("docs/b/notes.txt", b"other notes"),
+        ])
+        .await;
+    let expected: Vec<String> = indexed
+        .iter()
+        .filter(|chunk| chunk.source().location().key() == "docs/guide.md")
+        .map(|chunk| chunk.text().to_owned())
+        .collect();
+    assert!(expected.len() >= 3, "{expected:?}");
+    let texts = |reading: Reading| -> Vec<String> {
+        reading
+            .chunks()
+            .iter()
+            .map(|chunk| chunk.text().to_owned())
+            .collect()
+    };
+
+    let mut paged = Vec::new();
+    let mut first = 0;
+    loop {
+        let page = texts(f.reader.chunks("docs/guide.md", first, 2).await.unwrap());
+        if page.is_empty() {
+            break;
+        }
+        first += page.len();
+        paged.extend(page);
+    }
+    assert_eq!(paged, expected);
+    let all = f
+        .reader
+        .chunks("docs/guide.md", 0, usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(all.chunks()[1].source().location().key(), "docs/guide.md");
+    assert_eq!(texts(all), expected);
+
+    let entry = f.reader.file("docs/guide.md").await.unwrap().unwrap();
+    assert_eq!(entry.status(), FileStatus::Ready);
+    assert_eq!(f.reader.file("docs/none.txt").await.unwrap(), None);
+    let err = f.reader.file("elsewhere/x.txt").await.unwrap_err();
+    assert!(matches!(err, Error::FileOutsideData { .. }), "{err}");
+    let err = f.reader.chunks("docs/none.txt", 0, 1).await.unwrap_err();
+    assert!(matches!(err, Error::FileNotInIndex { .. }), "{err}");
+
+    let own = Scope::prefix("docs/guide");
+    let read = f
+        .reader
+        .chunks_within("docs/guide.md", 0, 1, &own, &Filter::new())
+        .await
+        .unwrap();
+    assert_eq!(read.chunks().len(), 1);
+    let other = Scope::prefix("docs/b/");
+    let err = f
+        .reader
+        .chunks_within("docs/guide.md", 0, 1, &other, &Filter::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::FileNotInIndex { .. }), "{err}");
+
+    let any = Filter::new();
+    let within = f.reader.file_within("docs/guide.md", &own, &any).await;
+    assert_eq!(within.unwrap().unwrap().status(), FileStatus::Ready);
+    let outside = f.reader.file_within("docs/guide.md", &other, &any).await;
+    assert_eq!(outside.unwrap(), None);
+    let owned = Filter::new().equals("owner", "x");
+    let unmatched = f.reader.file_within("docs/guide.md", &own, &owned).await;
+    assert_eq!(unmatched.unwrap(), None);
+    let missing = f.reader.file_within("docs/none.txt", &own, &any).await;
+    assert_eq!(missing.unwrap(), None);
+    let err = f
+        .reader
+        .file_within("elsewhere/x.txt", &own, &any)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::FileOutsideData { .. }), "{err}");
+
+    f.put("docs/guide.md", b"# Changed\n\nNew text.\n").await;
+    let err = f.reader.chunks("docs/guide.md", 0, 1).await.unwrap_err();
+    assert!(matches!(err, Error::StaleRef { .. }), "{err}");
+}
+
+#[tokio::test]
+async fn a_boost_reorders_the_candidates_and_never_adds_one() {
+    let f = Fixture::new().await;
+    f.index(&[
+        ("docs/a.txt", b"refund refund policy"),
+        ("docs/b.txt", b"refund rules"),
+        ("docs/c.txt", b"travel rules"),
+    ])
+    .await;
+    let change = AttributeChange::new("docs/b.txt")
+        .attribute("owner", AttributeValue::One("legal".to_owned()));
+    f.indexer
+        .apply(vec![FileChange::Attributes(change)])
+        .await
+        .unwrap();
+    f.reader.refresh().await.unwrap();
+    let keys = |results: SearchResults| -> Vec<String> {
+        results
+            .hits()
+            .iter()
+            .map(|hit| hit.source().location().key().to_owned())
+            .collect()
+    };
+    let plain = SearchRequest::new(Query::new("refund"));
+    assert_eq!(
+        keys(f.reader.search(&plain).await.unwrap()),
+        ["docs/a.txt", "docs/b.txt"]
+    );
+    let legal = Filter::new().equals("owner", "legal");
+    let level = plain.clone().boost(Boost::matching(legal.clone(), 1.0));
+    assert_eq!(
+        keys(f.reader.search(&level).await.unwrap()),
+        ["docs/a.txt", "docs/b.txt"]
+    );
+    let boosted = plain.clone().boost(Boost::matching(legal.clone(), 2.0));
+    assert_eq!(
+        keys(f.reader.search(&boosted).await.unwrap()),
+        ["docs/b.txt", "docs/a.txt"]
+    );
+    let none = plain.clone().boost(Boost::matching(legal, 0.0));
+    assert_eq!(
+        keys(f.reader.search(&none).await.unwrap()),
+        ["docs/a.txt", "docs/b.txt"]
+    );
+    let travel = plain.boost(Boost::matching(Filter::new().equals("owner", "x"), 5.0));
+    assert_eq!(keys(f.reader.search(&travel).await.unwrap()).len(), 2);
+
+    let bad = SearchRequest::new(Query::new("refund")).boost(Boost::matching(Filter::new(), -1.0));
+    let err = f.reader.search(&bad).await.unwrap_err();
+    assert!(matches!(err, Error::InvalidBoost { .. }), "{err}");
 }

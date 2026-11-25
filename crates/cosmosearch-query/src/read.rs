@@ -74,9 +74,60 @@ struct Found {
     last: usize,
 }
 
-/// Reads the passage `reference` names, and its neighbours within `reach`. A file outside
-/// `access` is reported as not in the index, before anything else about it is checked.
+/// What to read: the passage a ref names with its neighbours, or a run of a file's chunks
+/// in reading order.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Target<'a> {
+    Passage {
+        reference: &'a SourceRef,
+        reach: Reach,
+    },
+    File {
+        key: &'a str,
+        first: usize,
+        limit: usize,
+    },
+}
+
+impl Target<'_> {
+    pub(crate) fn key(&self) -> &str {
+        match self {
+            Target::Passage { reference, .. } => reference.location().key(),
+            Target::File { key, .. } => key,
+        }
+    }
+
+    pub(crate) fn not_in_index(&self) -> Error {
+        match self {
+            Target::Passage { reference, .. } => Error::NotInIndex {
+                reference: (*reference).clone(),
+            },
+            Target::File { key, .. } => Error::FileNotInIndex {
+                key: (*key).to_owned(),
+            },
+        }
+    }
+}
+
+/// Reads what `target` names. A file outside `access` is reported as not in the index,
+/// before anything else about it is checked.
 pub(crate) async fn run(
+    sources: Sources<'_>,
+    manifest: &Manifest,
+    target: Target<'_>,
+    access: Option<Access<'_>>,
+) -> Result<Vec<Chunk>> {
+    match target {
+        Target::Passage { reference, reach } => {
+            passage(sources, manifest, reference, reach, access).await
+        }
+        Target::File { key, first, limit } => {
+            file_chunks(sources, manifest, key, first, limit, access).await
+        }
+    }
+}
+
+async fn passage(
     sources: Sources<'_>,
     manifest: &Manifest,
     reference: &SourceRef,
@@ -110,10 +161,98 @@ pub(crate) async fn run(
             reference: reference.clone(),
         })?;
     let wanted = wanted(&found, reach);
-    let Some(profile) = wanted.first().map(ChunkRecord::profile) else {
+    if wanted.is_empty() {
         return Err(Error::NoPassage {
             reference: reference.clone(),
         });
+    }
+    read_records(sources, location, &key, entry, &wanted, reference).await
+}
+
+/// Reads up to `limit` chunks of the file `key`, from its chunk at position `first` in reading
+/// order; none once `first` is past its last chunk.
+async fn file_chunks(
+    sources: Sources<'_>,
+    manifest: &Manifest,
+    key: &str,
+    first: usize,
+    limit: usize,
+    access: Option<Access<'_>>,
+) -> Result<Vec<Chunk>> {
+    let object = file_inside(sources.data, key)?;
+    let not_in_index = || Error::FileNotInIndex {
+        key: key.to_owned(),
+    };
+    if access.is_some_and(|access| !access.scope.contains(key)) {
+        return Err(not_in_index());
+    }
+    let (_, shard) = manifest.shard_for(key).ok_or_else(not_in_index)?;
+    let files = sources.loader.files(shard).await?;
+    let entry = files.get(key).ok_or_else(not_in_index)?;
+    if access.is_some_and(|access| !access.filter.matches(entry.attributes(), entry.modified())) {
+        return Err(not_in_index());
+    }
+    let wanted = file_records(sources.loader, shard, entry, first, limit).await?;
+    let Some(start) = wanted.first() else {
+        return Ok(Vec::new());
+    };
+    let data = sources.data.location();
+    let location = Location::new(data.scheme(), data.authority(), key)?;
+    let reference = SourceRef::new(location.clone(), start.locator(), entry.etag().clone())?;
+    read_records(sources, &location, &object, entry, &wanted, &reference).await
+}
+
+/// The records of up to `limit` chunks of the file at `entry`, one for each locator in reading
+/// order, from position `first`.
+async fn file_records(
+    loader: &Loader<'_>,
+    shard: &ShardEntry,
+    entry: &FileEntry,
+    first: usize,
+    limit: usize,
+) -> Result<Vec<ChunkRecord>> {
+    for segment in shard.segments() {
+        if segment.level() == Level::L0 {
+            continue;
+        }
+        let Some(chunks) = loader.chunks(segment).await? else {
+            continue;
+        };
+        let mut rows = chunks
+            .file_rows(entry.ordinal(), entry.content_version())
+            .peekable();
+        if rows.peek().is_none() {
+            continue;
+        }
+        let mut last: Option<Locator> = None;
+        let records = rows
+            .filter_map(|row| chunks.get(row))
+            .filter(|record| {
+                let new = last != Some(record.locator());
+                last = Some(record.locator());
+                new
+            })
+            .skip(first)
+            .take(limit)
+            .cloned()
+            .collect();
+        return Ok(records);
+    }
+    Ok(Vec::new())
+}
+
+/// Reads the text of `wanted`, records of one file in reading order, with one read pinned to
+/// the file's ETag and one extraction by the extractor that indexed the first of them.
+async fn read_records(
+    sources: Sources<'_>,
+    location: &Location,
+    key: &ObjectKey,
+    entry: &FileEntry,
+    wanted: &[ChunkRecord],
+    reference: &SourceRef,
+) -> Result<Vec<Chunk>> {
+    let Some(profile) = wanted.first().map(ChunkRecord::profile) else {
+        return Ok(Vec::new());
     };
     let extractor = sources
         .plugins
@@ -125,7 +264,7 @@ pub(crate) async fn run(
         })?;
     let locators: Vec<Locator> = wanted.iter().map(ChunkRecord::locator).collect();
     let span = span_of(&locators, entry.size())?;
-    let bytes = read_pinned(sources, &key, span, entry, reference).await?;
+    let bytes = read_pinned(sources, key, span, entry, reference).await?;
     let texts = extract_texts(
         extractor,
         location.clone(),
@@ -224,6 +363,15 @@ pub(crate) async fn passages(
         .into_iter()
         .map(|locator| locator.and_then(text_at))
         .collect())
+}
+
+pub(crate) fn file_inside(data: &DataStore, key: &str) -> Result<ObjectKey> {
+    let outside = || Error::FileOutsideData {
+        key: key.to_owned(),
+    };
+    let object = ObjectKey::new(key).map_err(|_cause| outside())?;
+    data.check_inside(&object).map_err(|_cause| outside())?;
+    Ok(object)
 }
 
 fn inside_data(data: &DataStore, reference: &SourceRef) -> Result<ObjectKey> {

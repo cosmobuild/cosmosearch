@@ -2,11 +2,12 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use cosmosearch_core::{
-    FakeReranker, FileSource, Query, RerankCause, RerankError, RerankScores, Reranker,
-    RerankerIdentity, SharedReranker, Usage,
+    AttributeValue, FakeReranker, FileSource, Filter, Query, RerankCause, RerankError,
+    RerankScores, Reranker, RerankerIdentity, SharedReranker, Usage,
 };
+use cosmosearch_indexer::{AttributeChange, FileChange};
 use cosmosearch_query::{
-    Reader, ReaderOptions, RerankFailure, Reranking, SearchHit, SearchRequest, SearchResults,
+    Boost, Reader, ReaderOptions, RerankFailure, Reranking, SearchHit, SearchRequest, SearchResults,
 };
 
 use super::{Fixture, long_text, plugins};
@@ -318,4 +319,64 @@ async fn the_reranker_reads_each_passage_under_its_headings() {
     let mut read = reads.1.lock().unwrap().clone();
     read.sort();
     assert_eq!(read, ["Part 1\nrefund terms", "Part 2\nrefund dates"]);
+}
+
+async fn owned_by_x(f: &Fixture, key: &str) {
+    let change = AttributeChange::new(key).attribute("owner", AttributeValue::One("x".to_owned()));
+    f.indexer
+        .apply(vec![FileChange::Attributes(change)])
+        .await
+        .unwrap();
+}
+
+fn boosted(limit: usize, weight: f64) -> SearchRequest {
+    SearchRequest::new(Query::new(QUERY))
+        .limit(limit)
+        .boost(Boost::matching(Filter::new().equals("owner", "x"), weight))
+}
+
+#[tokio::test]
+async fn a_boost_places_reranked_hits_by_their_rerank_ranks() {
+    let f = Fixture::new().await;
+    eight_files(&f).await;
+    let plain = reader(&f, Some(SharedReranker::new(fake())), 8).await;
+    let order = keys(search(&plain, QUERY, 8).await.hits());
+    let last = order.last().unwrap().clone();
+    owned_by_x(&f, &last).await;
+    let reranking = reader(&f, Some(SharedReranker::new(fake())), 8).await;
+
+    let found = reranking.search(&boosted(8, 15.0)).await.unwrap();
+    let mut expected = vec![last.clone()];
+    expected.extend(order.iter().take(7).cloned());
+    assert_eq!(keys(found.hits()), expected);
+    assert!(found.hits().iter().all(|hit| hit.rerank_score().is_some()));
+    assert!((found.hits()[0].boost() - 16.0).abs() < 1e-12);
+    assert!(
+        found.hits()[1..]
+            .iter()
+            .all(|hit| (hit.boost() - 1.0).abs() < 1e-12)
+    );
+
+    let level = reranking.search(&boosted(8, 7.0)).await.unwrap();
+    assert_eq!(keys(level.hits())[..2], [order[0].clone(), last]);
+}
+
+#[tokio::test]
+async fn a_boost_chooses_the_shortlist_from_twice_as_many_candidates() {
+    let f = Fixture::new().await;
+    eight_files(&f).await;
+    let fused = keys(search(&reader(&f, None, 0).await, QUERY, 8).await.hits());
+    owned_by_x(&f, &fused[3]).await;
+    owned_by_x(&f, &fused[5]).await;
+
+    let plain = reader(&f, None, 0).await;
+    let found = plain.search(&boosted(2, 9.0)).await.unwrap();
+    assert_eq!(keys(found.hits()), [fused[3].clone(), fused[0].clone()]);
+
+    let reads = Reads(identity(), Arc::default());
+    let reranking = reader(&f, Some(SharedReranker::new(reads.clone())), 2).await;
+    let found = reranking.search(&boosted(2, 9.0)).await.unwrap();
+    assert_eq!(keys(found.hits())[0], fused[3]);
+    assert_eq!(reads.1.lock().unwrap().len(), 2);
+    assert!(!keys(found.hits()).contains(&fused[5]));
 }

@@ -29,17 +29,19 @@ If the index is lost or damaged, you delete it and build it again from the files
 ## Features
 
 - Keyword search everywhere, vector search where it pays off, merged and optionally reranked.
-  Keyword search can stem words in one of 18 languages, so `refund` also finds `refunds`.
+  Keyword search stems English words by default, or those of another of 18 languages, so
+  `refund` also finds `refunds`.
 - Exact phrases on request: with `Query::with_exact_phrases`, text in double quotes, such as
-  `"ERR_CONN_42"` or `"refund policy"`, must appear in keyword results.
+  `"ERR_CONN_42"` or `"refund policy"`, must appear in keyword results. With
+  `Query::with_every_word`, keyword results hold every word instead of any.
 - Text, Markdown, HTML, CSV, JSON, Word (`.docx`) and PDF.
 - Embedding and reranking models that run locally on the CPU, or any OpenAI-compatible
   embedding API and `/rerank` API over HTTP.
 - Results that cite a file, a byte range or page, and the file version they were read from.
   Reading a result back fails if the file has changed since.
 - Search scopes (only these prefixes), filters on your own attributes (values, numbers and
-  times, by value or range) and on modified time, and budgets (this many shards, this much
-  time).
+  times, by value or range) and on modified time, boosts for matching or recent files, and
+  budgets (this many shards, this much time).
 - Safe concurrent writers: index updates are atomic commits, and two writers never
   overwrite each other.
 - Everything beyond the core is an optional feature, so you compile only what you use.
@@ -137,9 +139,10 @@ None are on by default.
   local filesystem. In a local folder, a file's ETag comes from its inode, size and
   modification time, so change files by writing a new file and renaming it over the old
   one, not by rewriting them in place.
-- **Reading is not scoped.** `read` and `expand` return any indexed passage whose ref they
-  are given, whatever scope or filter the search had. If refs come from your users, use
-  `read_within` and `expand_within` with the scope and filter of that user's searches.
+- **Reading is not scoped.** `read`, `expand`, `file` and `chunks` return any indexed
+  passage or file whose ref or key they are given, whatever scope or filter the search had.
+  If refs or keys come from your users, use `read_within`, `expand_within`, `file_within`
+  and `chunks_within` with the scope and filter of that user's searches.
 - **No "not found" answer.** A search with no results ends `inconclusive`, never "absent":
   it tells you what it searched, but it does not claim that no answer exists.
 

@@ -7,13 +7,14 @@ use cosmosearch_core::{
     AllowedRows, ExtractorProfile, Filter, Hit, IndexError, IndexKind, Level, Locator, Manifest,
     ManifestVersion, Scope, SegmentEntry, SegmentId, ShardEntry, ShardId, SourceRef, Status, Usage,
 };
-use cosmosearch_format::{ChunkTable, FileTable};
+use cosmosearch_format::{ChunkTable, FileEntry, FileTable};
 use futures_util::{StreamExt, TryStreamExt, future, stream};
 
+use crate::boost;
 use crate::coverage::Counts;
 use crate::fuse::{self, Fusion};
 use crate::tables::{self, Loader};
-use crate::{Coverage, Plugins, Reranking, Result, SearchRequest, Snippet};
+use crate::{Boost, Coverage, Plugins, Reranking, Result, SearchRequest, Snippet};
 
 const LOAD_CONCURRENCY: usize = 8;
 
@@ -35,8 +36,11 @@ pub struct SearchHit {
     source: SourceRef,
     score: f32,
     list_scores: Vec<(IndexKind, f32)>,
+    list_ranks: Vec<(IndexKind, u32)>,
+    boost: f64,
     rerank_score: Option<f32>,
     heading_path: Vec<String>,
+    display_name: Option<String>,
     snippet: Option<Snippet>,
 }
 
@@ -47,7 +51,8 @@ impl SearchHit {
     }
 
     /// The reciprocal rank fusion score over the lists of the index kinds searched, higher
-    /// being better. It orders hits but means nothing on its own.
+    /// being better. It means nothing on its own, and with boosts, [`SearchHit::boost`] also
+    /// decides where the hit stands.
     pub fn score(&self) -> f32 {
         self.score
     }
@@ -59,8 +64,28 @@ impl SearchHit {
         &self.list_scores
     }
 
-    /// The reranker's score, for a hit in the shortlist whose passage could be read. Reranked
-    /// hits come first, ordered by it, higher being better.
+    /// The rank each index kind's list gave the passage, counting from 1, for the kinds whose
+    /// list held it, in the order of the kinds: with [`SearchHit::list_scores`], why fusion
+    /// placed the hit where it is.
+    pub fn list_ranks(&self) -> &[(IndexKind, u32)] {
+        &self.list_ranks
+    }
+
+    /// What the search's boosts multiplied together give the hit's file, 1 when none
+    /// applies: the hit stands at its rank divided by it, among the fused candidates and again
+    /// among the reranked hits. See [`crate::Boost`].
+    pub fn boost(&self) -> f64 {
+        self.boost
+    }
+
+    /// The name the host gave the passage's file, if any.
+    pub fn display_name(&self) -> Option<&str> {
+        self.display_name.as_deref()
+    }
+
+    /// The reranker's score, for a hit in the shortlist whose passage could be read, higher
+    /// being better. Reranked hits come first, ordered by it, or with boosts, by their rank by
+    /// it divided by [`SearchHit::boost`].
     pub fn rerank_score(&self) -> Option<f32> {
         self.rerank_score
     }
@@ -100,8 +125,14 @@ impl fmt::Debug for SearchHit {
             .field("source", &self.source)
             .field("score", &self.score)
             .field("list_scores", &self.list_scores)
+            .field("list_ranks", &self.list_ranks)
+            .field("boost", &self.boost)
             .field("rerank_score", &self.rerank_score)
             .field("headings", &self.heading_path.len())
+            .field(
+                "display_name_bytes",
+                &self.display_name.as_ref().map(String::len),
+            )
             .field("snippet", &self.snippet)
             .finish()
     }
@@ -183,9 +214,17 @@ impl SearchResults {
                     .iter()
                     .map(|(kind, _)| kind.as_str().len().saturating_add(LIST_SCORE_BYTES))
                     .sum();
+                let ranks: usize = hit
+                    .list_ranks
+                    .iter()
+                    .map(|(kind, _)| kind.as_str().len().saturating_add(LIST_SCORE_BYTES))
+                    .sum();
+                let name = hit.display_name.as_ref().map_or(0, String::len);
                 HIT_BYTES
                     .saturating_add(snippet)
                     .saturating_add(lists)
+                    .saturating_add(ranks)
+                    .saturating_add(name)
                     .saturating_add(hit.source.to_string().len())
                     .saturating_add(headings)
             })
@@ -379,8 +418,10 @@ pub(crate) async fn run(
         query,
         scope,
         filter,
+        boosts,
         ..
     } = request;
+    let pool = boost::pool(limit, boosts);
     let shards: Vec<_> = manifest
         .shards()
         .iter()
@@ -417,7 +458,7 @@ pub(crate) async fn run(
         Some(async move {
             let found = index
                 .get()
-                .search(loader.source(), &segments, allowed, query, depth(limit))
+                .search(loader.source(), &segments, allowed, query, depth(pool))
                 .await?;
             let of_kind: Vec<&Searchable> = segments
                 .iter()
@@ -426,7 +467,7 @@ pub(crate) async fn run(
             Ok::<_, IndexError>((kind, weight, found, of_kind))
         })
     });
-    let mut list_scores: BTreeMap<ChunkKey, Vec<(IndexKind, f32)>> = BTreeMap::new();
+    let mut places_in_lists = ListPlaces::default();
     for (kind, weight, found, of_kind) in future::try_join_all(searches).await? {
         kinds_segments.push(of_kind);
         *usage = usage.saturating_add(found.usage());
@@ -438,15 +479,13 @@ pub(crate) async fn run(
                 .then_with(|| a.row().cmp(&b.row()))
         });
         let mut list = Vec::with_capacity(hits.len());
+        let mut rank = 0;
         for hit in hits {
             let Some(segment) = by_id.get(hit.segment()) else {
                 continue;
             };
             if let Some((key, passage, place)) = resolve(segment, &hit, manifest)? {
-                let scores = list_scores.entry(key.clone()).or_default();
-                if !scores.iter().any(|(scored, _)| scored == kind) {
-                    scores.push((kind.clone(), hit.score()));
-                }
+                places_in_lists.record(&key, kind, hit.score(), &mut rank);
                 passages.entry(key.clone()).or_insert(passage);
                 places.entry(key.clone()).or_insert(place);
                 list.push(key);
@@ -455,25 +494,65 @@ pub(crate) async fn run(
         lists.push((weight, list));
     }
 
-    let mut found = Vec::with_capacity(limit.min(passages.len()));
+    let mut found = Vec::with_capacity(pool.min(passages.len()));
     let covers = |list: usize, key: &ChunkKey| {
         let (Some(segments), Some(place)) = (kinds_segments.get(list), places.get(key)) else {
             return false;
         };
         segments.iter().any(|segment| segment.holds(place))
     };
-    for (key, score) in fuse::fuse(&lists, fusion.k(), limit, covers) {
+    for (key, score) in fuse::fuse(&lists, fusion.k(), pool, covers) {
         if let Some(mut passage) = passages.remove(&key) {
             passage.score = score;
-            passage.list_scores = list_scores.remove(&key).unwrap_or_default();
+            passage.boost = multiplier(boosts, places.get(&key));
+            places_in_lists.place(&key, &mut passage);
             found.push(passage);
         }
     }
     Ok(Searched {
-        hits: found,
+        hits: boost::choose(found, boosts, limit),
         covered,
         counts,
     })
+}
+
+/// What `boosts` multiplied together give the file of the passage at `place`.
+fn multiplier(boosts: &[Boost], place: Option<&Place>) -> f64 {
+    place
+        .and_then(|place| place.table.by_ordinal(place.file_ordinal))
+        .map_or(1.0, |file| {
+            boosts.iter().map(|boost| boost.multiplier(file)).product()
+        })
+}
+
+/// Where each passage stood in each index kind's list: its score and its rank among the
+/// distinct passages of that list.
+#[derive(Default)]
+struct ListPlaces {
+    scores: BTreeMap<ChunkKey, Vec<(IndexKind, f32)>>,
+    ranks: BTreeMap<ChunkKey, Vec<(IndexKind, u32)>>,
+}
+
+impl ListPlaces {
+    /// Records the passage's place in `kind`'s list unless the list held it already, counting
+    /// it in `rank`.
+    fn record(&mut self, key: &ChunkKey, kind: &IndexKind, score: f32, rank: &mut u32) {
+        let scores = self.scores.entry(key.clone()).or_default();
+        if scores.iter().any(|(scored, _)| scored == kind) {
+            return;
+        }
+        scores.push((kind.clone(), score));
+        *rank = rank.saturating_add(1);
+        self.ranks
+            .entry(key.clone())
+            .or_default()
+            .push((kind.clone(), *rank));
+    }
+
+    fn place(&mut self, key: &ChunkKey, hit: &mut SearchHit) {
+        hit.list_scores = self.scores.remove(key).unwrap_or_default();
+        hit.list_ranks = self.ranks.remove(key).unwrap_or_default();
+    }
 }
 
 /// The segments of `searchable` with rows in `allowed`, by the index kind that built them.
@@ -653,8 +732,15 @@ fn resolve(
                 source,
                 score: hit.score(),
                 list_scores: Vec::new(),
+                list_ranks: Vec::new(),
+                boost: 1.0,
                 rerank_score: None,
                 heading_path: record.heading_path().to_vec(),
+                display_name: holder
+                    .files
+                    .by_ordinal(record.file_ordinal())
+                    .and_then(FileEntry::display_name)
+                    .map(str::to_owned),
                 snippet: None,
             };
             let place = Place {

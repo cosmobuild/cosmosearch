@@ -33,7 +33,7 @@ use crate::bundle::{Bundle, write_bundle};
 
 const TEXT: &str = "text";
 const NAME: &str = "name";
-const NAME_WEIGHT: f32 = 0.5;
+const DEFAULT_NAME_WEIGHT: f32 = 1.0;
 const ROW: &str = "row";
 const META_FILE: &str = "meta.json";
 const FILE_PREFIX: &str = "lex-";
@@ -140,34 +140,49 @@ fn names(chunks: &[Chunk]) -> Vec<Option<String>> {
 ///
 /// A chunk matches if it holds any word of the query. The first chunk of each file also
 /// matches the words of the file's name, its display name when it was indexed and the last
-/// part of its key without the extension, with half the weight of its text. For a query made with
+/// part of its key without the extension, with the same weight as its text unless
+/// [`Bm25::name_weight`] sets another. For a query made with
 /// [`Query::with_exact_phrases`], text in double quotes is a phrase: a chunk matches only if it
 /// holds those words next to each other, in that order, whatever their case and the
 /// punctuation between them. Every phrase must match, and the other words rank the chunks that
 /// do. A quote without its pair is ignored.
 ///
-/// Words are split on what is not a letter or digit and lower-cased. [`Bm25::stemmed`] also
-/// reduces them to their stems in one language. How words are made is part of the plug-in's
-/// kind, `bm25` or `bm25-stem-<code>`, so a plug-in searches only the segments built the
+/// Words are split on what is not a letter or digit, lower-cased and reduced to their stems in
+/// one language, English unless [`Bm25::stemmed`] names another. [`Bm25::plain`] leaves words
+/// as they are, for text such as code or logs. How words are made is part of the plug-in's
+/// kind, `bm25-stem-<code>` or `bm25`, so a plug-in searches only the segments built the
 /// same way. Segments of another kind are skipped, so a host that changes how an existing
 /// index makes words indexes its files again, for example with `FileChange::Retry`.
 #[derive(Debug, Clone)]
 pub struct Bm25 {
     kind: IndexKind,
     analyzer: Analyzer,
+    name_weight: f32,
     scoring_tasks: NonZeroUsize,
 }
 
 impl Bm25 {
-    /// Creates the plug-in, which does not stem.
+    /// Creates the plug-in, which reduces English words to their stems; its kind is
+    /// `bm25-stem-en`.
     ///
     /// # Errors
     ///
     /// Returns an error if the fixed kind is not valid, which is a bug.
     pub fn new() -> Result<Self, cosmosearch_core::Error> {
+        Self::stemmed(Language::English)
+    }
+
+    /// Creates the plug-in, which leaves words as they are, so that a search for `refund` does
+    /// not find `refunds`; its kind is `bm25`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the fixed kind is not valid, which is a bug.
+    pub fn plain() -> Result<Self, cosmosearch_core::Error> {
         Ok(Bm25 {
             kind: IndexKind::new("bm25")?,
             analyzer: Analyzer(None),
+            name_weight: DEFAULT_NAME_WEIGHT,
             scoring_tasks: NonZeroUsize::MIN,
         })
     }
@@ -183,8 +198,22 @@ impl Bm25 {
         Ok(Bm25 {
             kind: IndexKind::new(format!("bm25-stem-{}", language.code()))?,
             analyzer: Analyzer(Some(language)),
+            name_weight: DEFAULT_NAME_WEIGHT,
             scoring_tasks: NonZeroUsize::MIN,
         })
+    }
+
+    /// Sets the weight of a file's name against its text, 1 unless set. A weight that is not
+    /// finite and above zero leaves the name out of the search. It changes only how searches
+    /// score, so segments need not be built again.
+    #[must_use]
+    pub fn name_weight(mut self, weight: f32) -> Self {
+        self.name_weight = if weight.is_finite() && weight > 0.0 {
+            weight
+        } else {
+            0.0
+        };
+        self
     }
 
     /// Sets how many blocking tasks score a search's segments side by side; 1 unless set.
@@ -361,17 +390,18 @@ fn scoring_nothing(filter: DocPredicateQuery) -> Box<dyn TantivyQuery> {
     Box::new(BoostQuery::new(Box::new(filter), FILTER_SCORE))
 }
 
-/// The words of a query: those outside quotes, any of which may match the text or, with
-/// less weight, the name, and each quoted phrase, with every word at its position in the
-/// phrase.
+/// The words of a query: those outside quotes, any of which may match the text or the name,
+/// and each quoted phrase, with every word at its position in the phrase.
 struct Wanted {
     loose: Vec<Term>,
     names: Vec<Term>,
+    name_weight: f32,
+    every_word: bool,
     phrases: Vec<Vec<(usize, Term)>>,
 }
 
 impl Wanted {
-    fn of(segment: &OpenSegment, query: &Query) -> Result<Self, IndexError> {
+    fn of(segment: &OpenSegment, query: &Query, name_weight: f32) -> Result<Self, IndexError> {
         let schema = segment.index.schema();
         let field = field(&schema, TEXT)?;
         let name = self::field(&schema, NAME)?;
@@ -393,6 +423,7 @@ impl Wanted {
         loose.dedup();
         let names = loose
             .iter()
+            .filter(|_| name_weight > 0.0)
             .filter_map(|term| {
                 let value = term.value();
                 value.as_str().map(|word| Term::from_field_text(name, word))
@@ -406,6 +437,8 @@ impl Wanted {
         Ok(Wanted {
             loose,
             names,
+            name_weight,
+            every_word: query.every_word(),
             phrases,
         })
     }
@@ -428,23 +461,57 @@ impl Wanted {
         terms
     }
 
-    fn query(&self, kept: Box<dyn TantivyQuery>) -> BooleanQuery {
+    /// The words outside quotes, each matching the text or the name: any
+    /// of them, or with `every_word`, all of them.
+    fn loose(&self) -> Box<dyn TantivyQuery> {
+        let word = |text: &Term, name: Option<&Term>| -> Box<dyn TantivyQuery> {
+            let in_text = TermQuery::new(text.clone(), IndexRecordOption::WithFreqs);
+            let mut either: Vec<(Occur, Box<dyn TantivyQuery>)> =
+                vec![(Occur::Should, Box::new(in_text))];
+            if let Some(name) = name {
+                let in_name = TermQuery::new(name.clone(), IndexRecordOption::WithFreqs);
+                let weighted = BoostQuery::new(Box::new(in_name), self.name_weight);
+                either.push((Occur::Should, Box::new(weighted)));
+            }
+            Box::new(BooleanQuery::new(either))
+        };
+        if self.every_word {
+            let all = self
+                .loose
+                .iter()
+                .enumerate()
+                .map(|(at, text)| (Occur::Must, word(text, self.names.get(at))))
+                .collect();
+            return Box::new(BooleanQuery::new(all));
+        }
         let text: Box<dyn TantivyQuery> =
             Box::new(BooleanQuery::new_multiterms_query(self.loose.clone()));
+        if self.names.is_empty() {
+            return text;
+        }
         let name: Box<dyn TantivyQuery> = Box::new(BoostQuery::new(
             Box::new(BooleanQuery::new_multiterms_query(self.names.clone())),
-            NAME_WEIGHT,
+            self.name_weight,
         ));
-        let loose: Box<dyn TantivyQuery> = Box::new(BooleanQuery::new(vec![
+        Box::new(BooleanQuery::new(vec![
             (Occur::Should, text),
             (Occur::Should, name),
-        ]));
+        ]))
+    }
+
+    fn query(&self, kept: Box<dyn TantivyQuery>) -> BooleanQuery {
+        let loose = self.loose();
         if self.phrases.is_empty() {
             return BooleanQuery::new(vec![(Occur::Must, loose), (Occur::Must, kept)]);
         }
         let mut clauses = Vec::with_capacity(self.phrases.len().saturating_add(2));
         if !self.loose.is_empty() {
-            clauses.push((Occur::Should, loose));
+            let occur = if self.every_word {
+                Occur::Must
+            } else {
+                Occur::Should
+            };
+            clauses.push((occur, loose));
         }
         for phrase in &self.phrases {
             let required: Box<dyn TantivyQuery> = match phrase.as_slice() {
@@ -663,6 +730,10 @@ impl Index for Bm25 {
         Level::L1
     }
 
+    fn search_settings(&self) -> Vec<u64> {
+        vec![u64::from(self.name_weight.to_bits())]
+    }
+
     async fn build(&self, segment: &SegmentId, chunks: &[Chunk]) -> Result<Built, IndexError> {
         let name = SegmentFileName::new(format!("{FILE_PREFIX}{segment}.bin")).map_err(engine)?;
         let texts: Vec<(String, Option<String>)> = chunks
@@ -726,7 +797,7 @@ impl Bm25 {
         let Some(first) = opened.first() else {
             return Ok(Hits::default());
         };
-        let wanted = Wanted::of(first, query)?;
+        let wanted = Wanted::of(first, query, self.name_weight)?;
         if wanted.is_empty() {
             return Ok(Hits::default());
         }
