@@ -146,7 +146,9 @@ pub trait Index: Send + Sync + fmt::Debug {
 - **`search`** gets the segments it built that the search may touch, and `AllowedRows`, the
   rows the scope and filters allow. Score only those rows, so filtered-out chunks can never
   take a place in the results. Read your files through `source`, by byte range; it goes
-  through the shared cache when there is one.
+  through the shared cache when there is one. A keyword index should also honour the
+  query's `exact_phrases` (text in double quotes is a phrase) and `every_word` (a passage
+  must hold every word); other kinds may ignore them.
 - **`kind`, `level` and `model_id`** are recorded with every segment. Opening an index whose
   segments need a plug-in the engine wasn't given fails with an error naming it.
 - **`search_settings`** names every setting that changes which hits a search returns, such
