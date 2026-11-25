@@ -6,6 +6,8 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-25
+
 ### Added
 
 - `ExtractLimits::decoded_bytes` and `LimitKind::DecodedBytes`: the most bytes the
@@ -92,5 +94,6 @@ The first release.
 
 Requires Rust 1.99 or later.
 
-[Unreleased]: https://github.com/cosmobuild/cosmosearch/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/cosmobuild/cosmosearch/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/cosmobuild/cosmosearch/releases/tag/v0.2.0
 [0.1.0]: https://github.com/cosmobuild/cosmosearch/releases/tag/v0.1.0
