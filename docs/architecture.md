@@ -209,11 +209,11 @@ in.
 default), pages, characters, chunks, archive entries, archive expansion and nesting depth.
 A file that hits a limit, or makes a parser panic, fails with a reason. The panic's message
 is left out of the reason, but Rust's default panic hook prints it to stderr first, and it
-can quote document text; [SECURITY.md](../SECURITY.md) says how to keep it out of your logs. Code in the same
-process can't survive running out of memory, so if you index files you don't trust, run the
-extract step in a separate process with memory and time limits. The engine extracts files
-again to read passages back (for `read`, `expand`, snippets and reranking), so the same
-applies to the process that serves searches.
+can quote document text; [SECURITY.md](../SECURITY.md) says how to keep it out of your
+logs. Code in the same process can't survive running out of memory, so if you index files
+you don't trust, run the extract step in a separate process with memory and time limits.
+The engine extracts files again to read passages back (for `read`, `expand`, `chunks`,
+snippets and reranking), so the same applies to the process that serves searches.
 
 **Chunks** follow the structure of each format: headings and paragraphs for text, Markdown
 and HTML, pages for PDF, document elements for docx, records for CSV and values for JSON.
@@ -236,7 +236,9 @@ so a saved citation stays valid after the index is rebuilt.
 
 `read(ref)` and `expand(ref, before, after)` fetch the passage again from the file, pinned to
 the ref's ETag. If the file has changed, the read fails as stale instead of returning
-different text.
+different text. `chunks(key, first, limit)` reads a file's chunks in reading order the same
+way, without a ref, so a whole file can be read page by page, and `file(key)` gives its
+status.
 
 ## Searching
 
@@ -318,7 +320,7 @@ retries and backoff.
 vectors.
 
 - The engine records signals in memory: searches whose scope touched a shard, shards that
-  returned hits, `read` and `expand` calls, and shards an inconclusive search left
+  returned hits, `read`, `expand` and `chunks` calls, and shards an inconclusive search left
   unexplored.
 - Each process writes its counts to the metadata location under its own writer id, when
   the host calls `flush` (every minute or so). A merge job adds every process's counts
@@ -395,8 +397,9 @@ A few things only you can get right:
 - Treat extraction output as document text, because it is.
 - Keep host-named file lists and attributes somewhere, so you can replay them if the
   metadata location is lost. Everything else can be rebuilt from the data.
-- Check access before calling `read` with a ref that came from a user: `read` returns any
-  indexed passage its ref names.
+- Check access before reading with a ref or key that came from a user: `read`, `expand`,
+  `file` and `chunks` return whatever they are pointed at. Their `_within` forms check a
+  scope and filter for you.
 
 ## Code layout
 
@@ -408,7 +411,7 @@ A few things only you can get right:
 | `cosmosearch-format` | The file table and chunk records, in Parquet |
 | `cosmosearch-chunk` | Running extractors safely and cutting passages into chunks |
 | `cosmosearch-indexer` | File changes, indexing jobs, promotion |
-| `cosmosearch-query` | The reader: search, read, expand, refresh |
+| `cosmosearch-query` | The reader: search, reading passages and files, refresh |
 | `cosmosearch-lexical` | BM25 over tantivy |
 | `cosmosearch-vector` | The vector store, k-means, the IVF index and their file formats |
 | `cosmosearch-extract-*` | Extractors for CSV, docx, HTML, JSON and PDF |

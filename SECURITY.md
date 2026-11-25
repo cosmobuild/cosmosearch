@@ -23,12 +23,12 @@ and in pages, archive entries, expansion, decoded bytes and nesting depth where 
 has them. A PDF whose compressed streams decode to more than `ExtractLimits::decoded_bytes`
 fails before the parser reads it, and so does a PDF that this check cannot load.
 
-Extraction happens in two places. Indexing extracts every file once. Searching extracts a
-file again whenever it reads a passage back: `read` and `expand`, snippets that aren't in
-the passage cache, and reranking. If you index files you don't trust, run indexing's
+Extraction happens in two places. Indexing extracts every file once. The engine extracts a
+file again whenever it reads text back: `read`, `expand` and `chunks`, snippets that aren't
+in the passage cache, and reranking. If you index files you don't trust, run indexing's
 extract step in a separate process with memory and time limits, and do the same for the
 engine: serve searches from a process you can restart, or turn off snippets and reranking
-and call `read` and `expand` only from such a process.
+and call `read`, `expand` and `chunks` only from such a process.
 
 **Panic messages.** A parser that panics fails only its file: cosmosearch catches the panic
 and reports the file as failed, without the panic's message. Rust's panic hook runs first,

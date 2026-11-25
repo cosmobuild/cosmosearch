@@ -2,7 +2,7 @@
 
 Search, read and refresh for cosmosearch.
 
-Part of [cosmosearch](https://github.com/cosmobuild/cosmosearch). The reader behind `cosmosearch::Engine`: search, `read`, `expand` and refresh over a snapshot of the index. Most programs use it through [`cosmosearch`](https://crates.io/crates/cosmosearch).
+Part of [cosmosearch](https://github.com/cosmobuild/cosmosearch). The reader behind `cosmosearch::Engine`: search, `read`, `expand`, `file`, `chunks` and refresh over a snapshot of the index. Most programs use it through [`cosmosearch`](https://crates.io/crates/cosmosearch).
 
 ## License
 
