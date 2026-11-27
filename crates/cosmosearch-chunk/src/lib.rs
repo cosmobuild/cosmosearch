@@ -19,6 +19,10 @@
 //!         &["txt"]
 //!     }
 //!
+//!     fn media_types(&self) -> &[&str] {
+//!         &["text/plain"]
+//!     }
+//!
 //!     fn extract(&self, file: &[u8], _: &ExtractLimits) -> Result<Extraction, ExtractFailure> {
 //!         let text = std::str::from_utf8(file).map_err(|_| ExtractFailure::Malformed)?;
 //!         let end = u64::try_from(file.len()).map_err(|_| ExtractFailure::Malformed)?;

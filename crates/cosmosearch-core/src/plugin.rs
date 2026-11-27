@@ -18,10 +18,9 @@ pub trait Extractor: Send + Sync + fmt::Debug {
     fn extensions(&self) -> &[&str];
 
     /// The media types this extractor reads, in lower case and without parameters, for files
-    /// whose host names their type. Empty unless the extractor names some.
-    fn media_types(&self) -> &[&str] {
-        &[]
-    }
+    /// whose host names their type; empty for an extractor that names none. A wrapper forwards
+    /// the inner extractor's lists.
+    fn media_types(&self) -> &[&str];
 
     /// Extracts the passages of one file, in reading order, and counts the parts it could
     /// not read. Blocks for as long as parsing takes.

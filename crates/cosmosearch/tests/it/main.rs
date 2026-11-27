@@ -41,6 +41,10 @@ impl Extractor for FakeExtractor {
         &[]
     }
 
+    fn media_types(&self) -> &[&str] {
+        &[]
+    }
+
     fn extract(&self, _: &[u8], _: &ExtractLimits) -> Result<Extraction, ExtractFailure> {
         Ok(Extraction::new(vec![]))
     }

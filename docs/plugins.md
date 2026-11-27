@@ -53,6 +53,10 @@ impl Extractor for LogLines {
         &["log"]
     }
 
+    fn media_types(&self) -> &[&str] {
+        &["text/x-log"]
+    }
+
     fn extract(&self, file: &[u8], limits: &ExtractLimits) -> Result<Extraction, ExtractFailure> {
         let text = std::str::from_utf8(file).map_err(|_| ExtractFailure::Malformed)?;
         let mut passages = Vec::new();
@@ -89,13 +93,26 @@ let engine = Engine::builder(data, metadata)
     .await?;
 ```
 
-An extractor added for an extension replaces any built-in one for that extension, so you can
-also wrap a built-in extractor, for example to send PDFs without text to an OCR service.
+An extractor names the file name extensions and the media types it reads; return an empty
+list from `media_types` if it names none. A host that knows a file's type passes it with
+`FileUpsert::media_type`, and the extractor that reads that type is chosen ahead of the
+key's extension. Without a media type, or with one no extractor reads, the extension
+decides.
 
-An extractor can also name the media types it reads, such as `text/x-log`, by implementing
-`media_types`. A host that knows a file's type passes it with `FileUpsert::media_type`, and
-the extractor that reads that type is chosen ahead of the key's extension. Without a media
-type, or with one no extractor reads, the extension decides.
+An extractor added for an extension or media type replaces any built-in one for it, so you
+can also wrap a built-in extractor, for example to send PDFs without text to an OCR service.
+A wrapper holds the inner extractor, forwards both lists from it, and keeps a profile id
+of its own, since its passages differ:
+
+```rust
+fn extensions(&self) -> &[&str] {
+    self.inner.extensions()
+}
+
+fn media_types(&self) -> &[&str] {
+    self.inner.media_types()
+}
+```
 
 Things to get right:
 
