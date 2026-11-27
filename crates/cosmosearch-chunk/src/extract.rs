@@ -137,6 +137,10 @@ mod tests {
             &["txt"]
         }
 
+        fn media_types(&self) -> &[&str] {
+            &[]
+        }
+
         fn extract(&self, _: &[u8], _: &ExtractLimits) -> Result<Extraction, ExtractFailure> {
             match self.1 {
                 Behaviour::Passages(texts) => Ok(Extraction::new(

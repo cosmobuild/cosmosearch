@@ -57,6 +57,10 @@ impl Extractor for Pages {
         &["pages"]
     }
 
+    fn media_types(&self) -> &[&str] {
+        &[]
+    }
+
     fn extract(&self, file: &[u8], _: &ExtractLimits) -> Result<Extraction, ExtractFailure> {
         let text = std::str::from_utf8(file).map_err(|_cause| ExtractFailure::Malformed)?;
         let mut found = Vec::new();

@@ -27,6 +27,9 @@ All notable changes are listed here. The format follows
 
 ### Changed
 
+- `Extractor::media_types` has no default, so every extractor names its media types or
+  returns an empty list, and a wrapping extractor can't forget to forward them.
+  `docs/plugins.md` shows the forwarding pattern.
 - An engine no longer keeps every file table and chunk table it has decoded. It keeps the
   index of each file table and chunk file, and reads whole file tables only for shards a
   scope or filter cuts; otherwise it reads only the groups of files and chunk records its
