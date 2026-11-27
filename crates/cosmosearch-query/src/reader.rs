@@ -19,6 +19,7 @@ use crate::fuse::Fusion;
 use crate::passages::Passages;
 use crate::read::{Access, Reach, Sources, Target};
 use crate::search::{Reached, Searched};
+use crate::snippet;
 use crate::tables::{Loader, Tables};
 use crate::{
     Error, Plugins, Reading, Reranking, Result, SearchHit, SearchRequest, SearchResults, Snippet,
@@ -733,7 +734,8 @@ impl Reader {
             .await;
         for (hit, text) in hits.iter_mut().zip(texts) {
             if let Some(text) = text {
-                hit.set_snippet(Snippet::new(text, query.text()));
+                let marked = snippet::matches(self.plugins.indexes(), query, &text);
+                hit.set_snippet(Snippet::new(text, marked));
             }
         }
     }

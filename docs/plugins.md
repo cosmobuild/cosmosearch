@@ -125,6 +125,7 @@ pub trait Index: Send + Sync + fmt::Debug {
     fn level(&self) -> Level;
     fn model_id(&self) -> Option<&ModelId> { None }
     fn search_settings(&self) -> Vec<u64> { Vec::new() }
+    fn word_matches(&self, query: &Query, text: &str) -> Option<Vec<Range<usize>>> { None }
 
     async fn build(&self, segment: &SegmentId, chunks: &[Chunk]) -> Result<Built, IndexError>;
 
@@ -154,6 +155,11 @@ pub trait Index: Send + Sync + fmt::Debug {
 - **`search_settings`** names every setting that changes which hits a search returns, such
   as IVF's probes. A shared result cache keeps results apart by them, so leave out settings
   that only change speed.
+- **`word_matches`** gives the byte ranges of a passage that hold a word of the query, read
+  the way your index reads words. Snippets mark them, so a keyword index that stems or
+  folds words should implement it; leave it as `None` for an index that doesn't match
+  words. With no plug-in that returns ranges, snippets mark words equal to a query word,
+  whatever their case.
 - **The level** decides how the plug-in is used. An L1 plug-in indexes new files, so every
   file has a keyword segment. A plug-in above L1 builds only through promotion, and the
   indexer refuses it for new files.

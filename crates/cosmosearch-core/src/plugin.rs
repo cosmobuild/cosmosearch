@@ -1,4 +1,5 @@
 use std::fmt;
+use std::ops::Range;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -54,6 +55,14 @@ pub trait Index: Send + Sync + fmt::Debug {
     /// such settings.
     fn search_settings(&self) -> Vec<u64> {
         Vec::new()
+    }
+
+    /// The byte ranges of `text` that hold a word of `query` as this plug-in reads words, in
+    /// order, for marking matches in a passage. `None` for a plug-in that does not match
+    /// words, such as a vector index. A range that is empty or does not fall on character
+    /// boundaries of `text` is not marked.
+    fn word_matches(&self, _query: &Query, _text: &str) -> Option<Vec<Range<usize>>> {
+        None
     }
 
     /// Builds the files of a segment holding `chunks`, whose rows are their positions, and

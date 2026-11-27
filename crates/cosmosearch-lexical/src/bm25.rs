@@ -1,6 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
+use std::ops::Range;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -81,13 +82,23 @@ impl Analyzer {
     }
 
     fn register(self, index: &TantivyIndex) {
-        if let Some(language) = self.0 {
-            let analyzer = TextAnalyzer::builder(SimpleTokenizer::default())
+        if self.0.is_some() {
+            index
+                .tokenizers()
+                .register(&self.tokenizer(), self.text_analyzer());
+        }
+    }
+
+    /// The steps themselves; without a language, the same as tantivy's default tokenizer.
+    fn text_analyzer(self) -> TextAnalyzer {
+        let words = || {
+            TextAnalyzer::builder(SimpleTokenizer::default())
                 .filter(RemoveLongFilter::limit(LONGEST_WORD))
                 .filter(LowerCaser)
-                .filter(Stemmer::new(language.snowball()))
-                .build();
-            index.tokenizers().register(&self.tokenizer(), analyzer);
+        };
+        match self.0 {
+            None => words().build(),
+            Some(language) => words().filter(Stemmer::new(language.snowball())).build(),
         }
     }
 }
@@ -734,6 +745,23 @@ impl Index for Bm25 {
         vec![u64::from(self.name_weight.to_bits())]
     }
 
+    fn word_matches(&self, query: &Query, text: &str) -> Option<Vec<Range<usize>>> {
+        let mut analyzer = self.analyzer.text_analyzer();
+        let mut wanted = BTreeSet::new();
+        analyzer.token_stream(query.text()).process(&mut |token| {
+            wanted.insert(token.text.clone());
+        });
+        let mut found = Vec::new();
+        if !wanted.is_empty() {
+            analyzer.token_stream(text).process(&mut |token| {
+                if wanted.contains(&token.text) {
+                    found.push(token.offset_from..token.offset_to);
+                }
+            });
+        }
+        Some(found)
+    }
+
     async fn build(&self, segment: &SegmentId, chunks: &[Chunk]) -> Result<Built, IndexError> {
         let name = SegmentFileName::new(format!("{FILE_PREFIX}{segment}.bin")).map_err(engine)?;
         let texts: Vec<(String, Option<String>)> = chunks
@@ -819,5 +847,31 @@ impl Bm25 {
         let statistics = gather_statistics(&opened, &terms).await?;
         let hits = score(opened, wanted, statistics, limit, self.scoring_tasks).await?;
         Ok(Hits::new(hits, Usage::new()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tantivy::tokenizer::TokenizerManager;
+
+    use super::*;
+
+    fn tokens(mut analyzer: TextAnalyzer, text: &str) -> Vec<(String, usize, usize)> {
+        let mut found = Vec::new();
+        analyzer.token_stream(text).process(&mut |token| {
+            found.push((token.text.clone(), token.offset_from, token.offset_to));
+        });
+        found
+    }
+
+    #[test]
+    fn the_plain_analyzer_reads_words_as_the_default_tokenizer_does() {
+        let text = "Prix d'ÉTÉ, café-crème: x2 and a word longer than forty bytes \
+                    abcdefghijklmnopqrstuvwxyzabcdefghijklmnopq.";
+        let default = TokenizerManager::default().get(DEFAULT_TOKENIZER).unwrap();
+        assert_eq!(
+            tokens(Analyzer(None).text_analyzer(), text),
+            tokens(default, text)
+        );
     }
 }
