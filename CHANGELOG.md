@@ -12,6 +12,22 @@ All notable changes are listed here. The format follows
   read the way it reads words. It returns `None` unless a plug-in implements it, and BM25
   does.
 
+- `TableCache`, set with `EngineBuilder::table_cache` or `ReaderOptions::tables`: decoded
+  file tables and groups of files and chunk records under a byte budget that engines can
+  share, 64 MiB per engine unless set (`DEFAULT_TABLE_BUDGET`).
+- `Engine::resident_bytes` and `Reader::resident_bytes`: about how many bytes of decoded
+  tables an engine holds.
+
+### Changed
+
+- An engine no longer keeps every file table and chunk table it has decoded. It keeps the
+  index of each file table and chunk file, and reads whole file tables only for shards a
+  scope or filter cuts; otherwise it reads only the groups of files and chunk records its
+  hits and reads need.
+- File tables and chunk records are stored in groups of 512 with an index at the end of
+  the file, in `meta-<id>.bin` (file table format 4) and `chunks-<id>.bin` (chunk format
+  3). Indexes built by 0.2 must be built again.
+
 ### Fixed
 
 - Snippets mark words as the keyword index matched them, so with the stemming `Bm25::new()`

@@ -5,10 +5,10 @@ use bytes::Bytes;
 use cosmosearch_chunk::extract_chunks;
 use cosmosearch_core::{
     ByteRange, Chunk, ETag, ExtractFailure, ExtractLimits, Extractor, ExtractorProfile, Filter,
-    Level, LimitKind, Location, Locator, Manifest, Passage, Scope, ShardEntry, SharedExtractor,
-    SourceRef, Usage,
+    Level, LimitKind, Location, Locator, Manifest, Passage, Scope, SegmentEntry, ShardEntry,
+    SharedExtractor, SourceRef, Usage,
 };
-use cosmosearch_format::{ChunkRecord, ChunkTable, FileEntry};
+use cosmosearch_format::{ChunkIndex, ChunkRecord, FileEntry};
 use cosmosearch_store::{DataStore, ObjectKey};
 
 use crate::tables::Loader;
@@ -67,11 +67,14 @@ pub(crate) struct Sources<'a> {
     pub(crate) limits: ExtractLimits,
 }
 
-/// Where a ref's passage was found: the chunk records holding it and its first and last row.
+/// Where a ref's passage was found: the segment and chunk index holding it, its first and
+/// last row, and the extractor that found it.
 struct Found {
-    chunks: Arc<ChunkTable>,
+    segment: SegmentEntry,
+    index: Arc<ChunkIndex>,
     first: usize,
     last: usize,
+    profile: ExtractorProfile,
 }
 
 /// What to read: the passage a ref names with its neighbours, or a run of a file's chunks
@@ -145,8 +148,12 @@ async fn passage(
     let (_, shard) = manifest
         .shard_for(location.key())
         .ok_or_else(not_in_index)?;
-    let files = sources.loader.files(shard).await?;
-    let entry = files.get(location.key()).ok_or_else(not_in_index)?;
+    let entry = sources
+        .loader
+        .file(shard, location.key())
+        .await?
+        .ok_or_else(not_in_index)?;
+    let entry = &entry;
     if access.is_some_and(|access| !access.filter.matches(entry.attributes(), entry.modified())) {
         return Err(not_in_index());
     }
@@ -160,7 +167,7 @@ async fn passage(
         .ok_or_else(|| Error::NoPassage {
             reference: reference.clone(),
         })?;
-    let wanted = wanted(&found, reach);
+    let wanted = wanted(sources.loader, &found, reach).await?;
     if wanted.is_empty() {
         return Err(Error::NoPassage {
             reference: reference.clone(),
@@ -187,8 +194,12 @@ async fn file_chunks(
         return Err(not_in_index());
     }
     let (_, shard) = manifest.shard_for(key).ok_or_else(not_in_index)?;
-    let files = sources.loader.files(shard).await?;
-    let entry = files.get(key).ok_or_else(not_in_index)?;
+    let entry = sources
+        .loader
+        .file(shard, key)
+        .await?
+        .ok_or_else(not_in_index)?;
+    let entry = &entry;
     if access.is_some_and(|access| !access.filter.matches(entry.attributes(), entry.modified())) {
         return Err(not_in_index());
     }
@@ -215,27 +226,33 @@ async fn file_records(
         if segment.level() == Level::L0 {
             continue;
         }
-        let Some(chunks) = loader.chunks(segment).await? else {
+        let Some(index) = loader.index(segment).await? else {
             continue;
         };
-        let mut rows = chunks
-            .file_rows(entry.ordinal(), entry.content_version())
-            .peekable();
-        if rows.peek().is_none() {
+        let rows = index.file_rows(entry.ordinal(), entry.content_version());
+        if rows.is_empty() {
             continue;
         }
         let mut last: Option<Locator> = None;
-        let records = rows
-            .filter_map(|row| chunks.get(row))
-            .filter(|record| {
-                let new = last != Some(record.locator());
+        let mut distinct = 0usize;
+        let mut records = Vec::new();
+        loader
+            .scan(segment, &index, rows, |_, record| {
+                if last == Some(record.locator()) {
+                    return true;
+                }
                 last = Some(record.locator());
-                new
+                let at = distinct;
+                distinct = distinct.saturating_add(1);
+                if at >= first.saturating_add(limit) {
+                    return false;
+                }
+                if at >= first {
+                    records.push(record.clone());
+                }
+                true
             })
-            .skip(first)
-            .take(limit)
-            .cloned()
-            .collect();
+            .await?;
         return Ok(records);
     }
     Ok(Vec::new())
@@ -302,8 +319,12 @@ pub(crate) async fn passages(
     let (_, shard) = manifest
         .shard_for(location.key())
         .ok_or_else(not_in_index)?;
-    let files = sources.loader.files(shard).await?;
-    let entry = files.get(location.key()).ok_or_else(not_in_index)?;
+    let entry = sources
+        .loader
+        .file(shard, location.key())
+        .await?
+        .ok_or_else(not_in_index)?;
+    let entry = &entry;
     if !first.is_current(entry.etag()) {
         return Err(Error::StaleRef {
             reference: (*first).clone(),
@@ -315,10 +336,7 @@ pub(crate) async fn passages(
     for reference in references {
         let locator = reference.locator();
         let at = find(sources.loader, shard, entry, locator).await?;
-        let indexed_by = at
-            .as_ref()
-            .and_then(|at| at.chunks.get(at.first))
-            .map(ChunkRecord::profile);
+        let indexed_by = at.as_ref().map(|at| &at.profile);
         let readable = match (indexed_by, &profile) {
             (Some(by), Some(chosen)) => by == chosen,
             (Some(by), None) => {
@@ -396,18 +414,31 @@ async fn find(
         if segment.level() == Level::L0 {
             continue;
         }
-        let Some(chunks) = loader.chunks(segment).await? else {
+        let Some(index) = loader.index(segment).await? else {
             continue;
         };
-        let rows = chunks.file_rows(entry.ordinal(), entry.content_version());
-        let matching: Vec<usize> = rows
-            .filter(|row| chunks.get(*row).is_some_and(|r| r.locator() == locator))
-            .collect();
-        if let (Some(first), Some(last)) = (matching.first(), matching.last()) {
+        let rows = index.file_rows(entry.ordinal(), entry.content_version());
+        let mut matching: Option<(usize, usize)> = None;
+        loader
+            .scan(segment, &index, rows, |row, record| {
+                if record.locator() != locator {
+                    return matching.is_none();
+                }
+                matching = Some(matching.map_or((row, row), |(first, _)| (first, row)));
+                true
+            })
+            .await?;
+        if let Some((first, last)) = matching {
+            let Some(place) = index.place(first) else {
+                continue;
+            };
+            let profile = place.profile.clone();
             return Ok(Some(Found {
-                first: *first,
-                last: *last,
-                chunks,
+                segment: segment.clone(),
+                first,
+                last,
+                profile,
+                index,
             }));
         }
     }
@@ -415,22 +446,22 @@ async fn find(
 }
 
 /// The records to read, one for each locator in reading order.
-fn wanted(found: &Found, reach: Reach) -> Vec<ChunkRecord> {
-    let start = found.chunks.neighbours(found.first, reach.before, 0).start;
-    let end = found.chunks.neighbours(found.last, 0, reach.after).end;
+async fn wanted(loader: &Loader<'_>, found: &Found, reach: Reach) -> Result<Vec<ChunkRecord>> {
+    let start = found.index.neighbours(found.first, reach.before, 0).start;
+    let end = found.index.neighbours(found.last, 0, reach.after).end;
     let mut wanted: Vec<ChunkRecord> = Vec::new();
-    for row in start..end {
-        let Some(record) = found.chunks.get(row) else {
-            continue;
-        };
+    for record in loader
+        .records(&found.segment, &found.index, start..end)
+        .await?
+    {
         if wanted
             .last()
             .is_none_or(|last| last.locator() != record.locator())
         {
-            wanted.push(record.clone());
+            wanted.push(record);
         }
     }
-    wanted
+    Ok(wanted)
 }
 
 /// The bytes to read: the whole file if any locator needs it parsed, else the ranges' span.

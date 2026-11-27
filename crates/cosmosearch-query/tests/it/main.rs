@@ -42,6 +42,7 @@ mod rerank;
 mod results;
 mod scopes;
 mod snippets;
+mod tables;
 
 #[derive(Debug)]
 struct Pages(ExtractorProfile);
@@ -211,7 +212,7 @@ impl Fixture {
                     .await
                     .unwrap();
                 let twin = SegmentId::new(format!("{}-{}", segment.id(), index.kind())).unwrap();
-                let name = SegmentFileName::new(format!("chunks-{twin}.parquet")).unwrap();
+                let name = SegmentFileName::new(format!("chunks-{twin}.bin")).unwrap();
                 self.handle
                     .write_segment_file(&twin, &name, body)
                     .await

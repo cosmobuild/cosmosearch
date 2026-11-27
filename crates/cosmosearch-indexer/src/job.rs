@@ -724,7 +724,7 @@ impl Indexer {
         let built = plugin.build(&id, &chunks).await?;
         let usage = built.usage();
         let mut files = built.into_files();
-        let name = SegmentFileName::new(format!("{CHUNKS_PREFIX}{id}.parquet"))?;
+        let name = SegmentFileName::new(format!("{CHUNKS_PREFIX}{id}.bin"))?;
         files.push(cosmosearch_core::BuiltFile::new(name, table.encode()?));
         let mut stored = Vec::with_capacity(files.len());
         for file in files {

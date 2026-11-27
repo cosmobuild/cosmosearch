@@ -61,8 +61,8 @@ files produce new segments, and nothing is edited in place. A segment can hold:
 
 | File | Contents |
 | --- | --- |
-| `meta-<id>.parquet` | The file table: key, size, ETag, status, media type, modified time, attributes |
-| `chunks-<id>.parquet` | One record per chunk: where it is in its file, its headings, its hash |
+| `meta-<id>.bin` | The file table: key, size, ETag, status, media type, modified time, attributes. Files are kept in Parquet groups of 512 by ordinal, followed by an index of each file's ordinal, content version, state and key hash and of where each group is |
+| `chunks-<id>.bin` | One record per chunk: where it is in its file, its headings, its hash. Records are kept in Parquet groups of 512 rows, followed by an index of where each file's chunks and each group are |
 | `lex-<id>.bin` | The BM25 keyword index (tantivy's files bundled into one object) |
 | `ivf-<id>.bin` | The vector index: centroids, cluster table, binary and int8 vectors |
 
@@ -343,7 +343,8 @@ set a smaller shard size, or embed chosen files with `plan_embedding`.
 
 ## Caching
 
-All caches are optional, bounded, and shared by every engine you hand them to.
+All caches are bounded and shared by every engine you hand them to. All but the table
+cache are optional.
 
 - **`Cache`** keeps index files in memory and, optionally, on disk. It cuts them into
   aligned blocks (64 KiB by default), fetches only missing blocks, and fetches a block once
@@ -352,6 +353,16 @@ All caches are optional, bounded, and shared by every engine you hand them to.
 - **`SearchCache`** keeps whole search results, keyed by the manifest version and everything
   that affects the result. A commit makes older results unreachable.
 - **`TextCache`** keeps passage text, keyed by ref, for snippets and reranking.
+- **`TableCache`** keeps decoded file tables and groups of files and chunk records under a
+  byte budget, and drops the least recently used first. A search reads whole file tables
+  only for shards that a scope or filter cuts, and otherwise reads only the group holding
+  each hit's file and the group holding each hit's record. Each engine has its own cache of
+  64 MiB unless you give engines one to share. Besides it, an engine keeps the index of
+  each file table and chunk file, so a search over whole shards with no filter decides
+  which chunks are live without decoding any table, and a read finds its file by key.
+  `Engine::resident_bytes` says how much an engine holds, counting the tables of its index
+  in the cache, which engines of one index sharing a cache share. A table larger than the
+  whole budget is not kept, so each search that needs it reads it again.
 
 Results and passages contain document text, so neither is returned after a lifetime you set.
 An expired entry leaves memory when it is next looked up or when a later entry is kept. To

@@ -123,8 +123,12 @@ None are on by default.
 
 ## Limits
 
-- **Size.** A search without a scope covers every segment of the index and keeps each
-  segment's file and chunk tables in memory. For large corpora, use search scopes.
+- **Size.** A search without a scope covers every segment of the index, and each segment it
+  searches costs reads and time. An engine keeps a small index of each file table and chunk
+  file, and keeps the tables it decodes in a cache under a byte budget. While a call runs it
+  also holds what it read: a search with a scope or filter holds the whole file table of
+  each shard it cuts, and reads that table again if it is larger than the budget. For large
+  corpora, use search scopes.
 - **Untrusted files.** Text extraction runs inside your process, both when indexing and when
   the engine reads text back (`read`, `expand`, `chunks`, snippets and reranking), and a
   crafted PDF can use a lot of memory and time. If you index files you don't trust, run both in
