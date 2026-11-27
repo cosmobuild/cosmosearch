@@ -75,6 +75,11 @@ impl Plugins {
         self.indexes.keys()
     }
 
+    /// The index plug-ins, in the order of their kinds.
+    pub(crate) fn indexes(&self) -> impl Iterator<Item = &SharedIndex> {
+        self.indexes.values()
+    }
+
     /// What gives the reranker's scores, if there is a reranker.
     pub fn reranker(&self) -> Option<&RerankerIdentity> {
         self.reranker

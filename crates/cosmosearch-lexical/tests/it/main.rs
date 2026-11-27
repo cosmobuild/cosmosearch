@@ -876,6 +876,29 @@ async fn a_stemmed_index_matches_other_forms_of_a_word_and_plain_does_not() {
     );
 }
 
+#[test]
+fn words_are_marked_as_the_index_reads_them() {
+    let text = "Refunds: the REFUNDED order, refund-policy and a policy.";
+    let marked = |index: &Bm25, query: &str| -> Vec<&str> {
+        index
+            .word_matches(&Query::new(query), text)
+            .unwrap()
+            .into_iter()
+            .map(|range| text.get(range).unwrap())
+            .collect()
+    };
+    let english = Bm25::new().unwrap();
+    let plain = Bm25::plain().unwrap();
+    assert_eq!(
+        marked(&english, "refund"),
+        ["Refunds", "REFUNDED", "refund"]
+    );
+    assert_eq!(marked(&plain, "refund"), ["refund"]);
+    assert_eq!(marked(&plain, "\"Policy\""), ["policy", "policy"]);
+    assert_eq!(marked(&english, ""), Vec::<&str>::new());
+    assert_eq!(marked(&english, "?!"), Vec::<&str>::new());
+}
+
 #[tokio::test]
 async fn a_file_name_matches_on_its_first_chunk_only_with_its_own_weight() {
     let handle = index().await;

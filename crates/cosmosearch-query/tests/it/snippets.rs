@@ -88,6 +88,25 @@ async fn a_hit_carries_its_passage_with_the_querys_words_marked() {
 }
 
 #[tokio::test]
+async fn other_forms_of_a_word_are_marked_as_the_keyword_index_matched_them() {
+    let f = Fixture::new().await;
+    f.index(&[(
+        "docs/a.txt",
+        b"Refunds are paid weekly. The refunded orders ship back.",
+    )])
+    .await;
+    let reader = reader(&f, ReaderOptions::new().snippets(10), false).await;
+    let results = search(&reader, "refund").await;
+    let snippet = results.hits().first().unwrap().snippet().unwrap();
+    let marked: Vec<&str> = snippet
+        .matches()
+        .iter()
+        .map(|range| snippet.text().get(range.clone()).unwrap())
+        .collect();
+    assert_eq!(marked, ["Refunds", "refunded"]);
+}
+
+#[tokio::test]
 async fn at_most_the_set_number_of_files_is_read_for_snippets() {
     let f = Fixture::new().await;
     three_files(&f).await;

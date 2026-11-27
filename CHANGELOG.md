@@ -6,6 +6,18 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `Index::word_matches`: an index plug-in can say where a passage holds a word of the query,
+  read the way it reads words. It returns `None` unless a plug-in implements it, and BM25
+  does.
+
+### Fixed
+
+- Snippets mark words as the keyword index matched them, so with the stemming `Bm25::new()`
+  turns on by default a search for `refund` marks `Refunds` and `refunded`. Before, a
+  snippet marked only words equal to a query word, and a stemmed match showed no mark.
+
 ## [0.2.0] - 2026-11-25
 
 ### Added
