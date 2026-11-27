@@ -33,7 +33,8 @@ All notable changes are listed here. The format follows
   hits and reads need.
 - File tables and chunk records are stored in groups of 512 with an index at the end of
   the file, in `meta-<id>.bin` (file table format 4) and `chunks-<id>.bin` (chunk format
-  3). Indexes built by 0.2 must be built again.
+  3). Indexes built by 0.2 must be built again: opening one fails with an unsupported
+  manifest format, and 0.2 refuses indexes built by this version.
 
 ### Fixed
 

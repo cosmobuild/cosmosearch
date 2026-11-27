@@ -75,8 +75,9 @@ pub enum Error {
         limit: crate::LimitKind,
     },
 
-    /// An object was written in a format this version does not understand.
-    #[error("unsupported format {format}")]
+    /// An object was written in a format this version does not understand, such as an index
+    /// built by another version of cosmosearch, which must be built again with this one.
+    #[error("unsupported format {format}: build the index again with this version")]
     UnsupportedFormat {
         /// The format the object declares.
         format: u32,
