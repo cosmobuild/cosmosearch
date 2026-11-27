@@ -20,6 +20,7 @@ use crate::passages::Passages;
 use crate::read::{Access, Reach, Sources, Target};
 use crate::search::{Reached, Searched};
 use crate::snippet;
+use crate::table_cache::{DEFAULT_TABLE_BUDGET, TableCache};
 use crate::tables::{Loader, Tables};
 use crate::{
     Error, Plugins, Reading, Reranking, Result, SearchHit, SearchRequest, SearchResults, Snippet,
@@ -51,6 +52,7 @@ pub struct ReaderOptions {
     passages: Option<SharedPassages>,
     snippet_files: usize,
     heat: Option<SharedHeat>,
+    tables: Option<TableCache>,
 }
 
 impl Default for ReaderOptions {
@@ -65,6 +67,7 @@ impl Default for ReaderOptions {
             passages: None,
             snippet_files: 0,
             heat: None,
+            tables: None,
         }
     }
 }
@@ -141,7 +144,8 @@ impl ReaderOptions {
     /// Gives each hit a snippet: its passage, read back from its file, with the query's words
     /// marked. One search reads at most `max_files` files for snippets, those of its best
     /// hits first, and the hits of other files have none; zero, the default, gives no
-    /// snippets and reads nothing.
+    /// snippets and reads nothing. In an index with stored text, a hit whose chunk has text
+    /// takes it from the index instead, without counting toward `max_files`.
     #[must_use]
     pub fn snippets(mut self, max_files: usize) -> Self {
         self.snippet_files = max_files;
@@ -164,6 +168,15 @@ impl ReaderOptions {
     #[must_use]
     pub fn heat(mut self, heat: SharedHeat) -> Self {
         self.heat = Some(heat);
+        self
+    }
+
+    /// Keeps the file tables and chunk records this reader decodes for hits, scopes and
+    /// filters in `tables`, which readers of any index can share under one budget. Unless
+    /// set, each reader has its own cache of [`DEFAULT_TABLE_BUDGET`] bytes.
+    #[must_use]
+    pub fn tables(mut self, tables: TableCache) -> Self {
+        self.tables = Some(tables);
         self
     }
 }
@@ -225,6 +238,11 @@ impl Reader {
         let (index, manifest) = ready.into_parts();
         check_plugins(&plugins, &manifest)?;
         let files = cached_files(&options, index.id(), &manifest);
+        let shared = options
+            .tables
+            .clone()
+            .unwrap_or_else(|| TableCache::new(DEFAULT_TABLE_BUDGET));
+        let tables = Tables::new(index.id().clone(), shared);
         Ok(Reader {
             data,
             metadata,
@@ -237,8 +255,15 @@ impl Reader {
                 refreshed_at: Instant::now(),
                 gone: None,
             }),
-            tables: Tables::default(),
+            tables,
         })
+    }
+
+    /// About how many bytes of decoded tables this reader holds: what it keeps for every
+    /// search, and the tables of its index in its table cache, which readers of the same
+    /// index sharing the cache share.
+    pub fn resident_bytes(&self) -> u64 {
+        self.tables.resident_bytes()
     }
 
     /// The manifest this reader searches.
@@ -591,14 +616,14 @@ impl Reader {
             let Some((shard_id, shard)) = manifest.shard_for(key) else {
                 return Ok(None);
             };
-            match loader.files(shard).await {
-                Ok(files) => {
-                    let entry = files.get(key).filter(|entry| {
+            match loader.file(shard, key).await {
+                Ok(entry) => {
+                    let entry = entry.filter(|entry| {
                         access.is_none_or(|access| {
                             access.filter.matches(entry.attributes(), entry.modified())
                         })
                     });
-                    return Ok(entry.cloned());
+                    return Ok(entry);
                 }
                 Err(Error::Index(IndexError::MissingSegment { segment })) if !refreshed => {
                     warn!(segment = %segment, "a segment is missing, so the reader refreshes");
@@ -665,7 +690,8 @@ impl Reader {
         let mut loader = Loader::new(&self.index, &self.tables, cache);
         let mut refreshed = false;
         loop {
-            match read::run(self.sources(&loader), &manifest, target, access).await {
+            let sources = self.sources(&loader);
+            match read::run(sources, &manifest, target, access).await {
                 Ok(chunks) => {
                     if let Some((shard, _)) = manifest.shard_for(target.key()) {
                         self.record(Signal::Read, &[shard]);
@@ -727,11 +753,8 @@ impl Reader {
         if self.options.snippet_files == 0 {
             return;
         }
-        let references: Vec<SourceRef> = hits.iter().map(|hit| hit.source().clone()).collect();
-        let references: Vec<&SourceRef> = references.iter().collect();
-        let texts = passages
-            .texts(&references, self.options.snippet_files)
-            .await;
+        let views: Vec<&SearchHit> = hits.iter().collect();
+        let texts = passages.texts(&views, self.options.snippet_files).await;
         for (hit, text) in hits.iter_mut().zip(texts) {
             if let Some(text) = text {
                 let marked = snippet::matches(self.plugins.indexes(), query, &text);

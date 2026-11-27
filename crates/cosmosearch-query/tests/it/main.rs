@@ -17,9 +17,9 @@ use cosmosearch_chunk::Extractors;
 use cosmosearch_core::{
     AllowedRows, AttributeValue, Built, BuiltBy, ByteRange, Chunk, ETag, ExtractFailure,
     ExtractLimits, Extraction, Extractor, ExtractorProfile, FileSource, Filter, HeatSink, Hit,
-    Hits, Index, IndexError, IndexKind, KeyRange, Level, Locator, Number, Passage, Query, Scope,
-    SegmentEntry, SegmentFile, SegmentFileName, SegmentId, SegmentSource, ShardEntry, ShardId,
-    SharedExtractor, SharedHeat, SharedIndex, Signal, SourceRef, Timestamp, Usage,
+    Hits, Index, IndexError, IndexKind, IndexOptions, KeyRange, Level, Locator, Number, Passage,
+    Query, Scope, SegmentEntry, SegmentFile, SegmentFileName, SegmentId, SegmentSource, ShardEntry,
+    ShardId, SharedExtractor, SharedHeat, SharedIndex, Signal, SourceRef, Timestamp, Usage,
 };
 use cosmosearch_extract_html::Html;
 use cosmosearch_format::FileStatus;
@@ -42,6 +42,8 @@ mod rerank;
 mod results;
 mod scopes;
 mod snippets;
+mod stored;
+mod tables;
 
 #[derive(Debug)]
 struct Pages(ExtractorProfile);
@@ -153,6 +155,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Fixture {
+        Fixture::with_options(IndexOptions::new()).await
+    }
+
+    async fn with_options(options: IndexOptions) -> Fixture {
         let store = MemoryStore::new();
         let data =
             DataStore::new(store.clone(), "s3://example-bucket/docs/".parse().unwrap()).unwrap();
@@ -160,7 +166,7 @@ impl Fixture {
             MetadataStore::new(store.clone(), "s3://example-bucket/index".parse().unwrap())
                 .unwrap();
         let outcome = metadata
-            .create(data.location(), FileSource::HostNamed)
+            .create_with(data.location(), FileSource::HostNamed, options)
             .await
             .unwrap();
         let CreateOutcome::Created(index) = outcome else {
@@ -211,7 +217,7 @@ impl Fixture {
                     .await
                     .unwrap();
                 let twin = SegmentId::new(format!("{}-{}", segment.id(), index.kind())).unwrap();
-                let name = SegmentFileName::new(format!("chunks-{twin}.parquet")).unwrap();
+                let name = SegmentFileName::new(format!("chunks-{twin}.bin")).unwrap();
                 self.handle
                     .write_segment_file(&twin, &name, body)
                     .await

@@ -1,13 +1,16 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use cosmosearch_core::{IndexId, Manifest, SharedPassages, SourceRef};
+use cosmosearch_core::{IndexId, Manifest, ShardEntry, SharedPassages, SourceRef};
+
+use crate::SearchHit;
+use crate::search::ChunkAt;
 use futures_util::{StreamExt, stream};
 use tracing::warn;
 
 use crate::read::{self, Sources};
 
-/// Files read at once; a search reads few, so this rarely binds.
+/// Files or groups of stored text read at once; a search reads few, so this rarely binds.
 const READ_CONCURRENCY: usize = 8;
 
 /// The passage text one search has read, and where it finds more: a passage cache, if the
@@ -37,17 +40,28 @@ impl<'a> Passages<'a> {
         }
     }
 
-    /// The text of each of `references`, or none where it could not be had. Passages this
-    /// search or the cache already holds cost nothing; for the rest at most `max_files`
-    /// files are read, those of the first references first.
+    /// The text of each of `hits`, or none where it could not be had. A hit whose chunk has
+    /// stored text takes it; passages this search or the cache already holds cost nothing;
+    /// for the rest at most `max_files` files are read, those of the first hits first.
     pub(crate) async fn texts(
         &mut self,
-        references: &[&SourceRef],
+        hits: &[&SearchHit],
         max_files: usize,
     ) -> Vec<Option<Arc<str>>> {
+        let references: Vec<&SourceRef> = hits.iter().map(|hit| hit.source()).collect();
+        let references = references.as_slice();
         let mut texts: Vec<Option<Arc<str>>> = Vec::with_capacity(references.len());
         let mut files: Vec<Vec<usize>> = Vec::new();
-        for (position, reference) in references.iter().enumerate() {
+        let looks: Vec<_> = hits.iter().map(|hit| self.own(hit)).collect();
+        let stored: Vec<Option<Arc<str>>> = stream::iter(looks)
+            .buffered(READ_CONCURRENCY)
+            .collect()
+            .await;
+        for (position, (reference, own)) in references.iter().zip(stored).enumerate() {
+            if own.is_some() {
+                texts.push(own);
+                continue;
+            }
             let known = self.known(reference);
             if known.is_none() {
                 let same_file = |positions: &&mut Vec<usize>| {
@@ -102,6 +116,39 @@ impl<'a> Passages<'a> {
             }
         }
         texts
+    }
+
+    /// The stored text of `hit`'s own chunk, if its segment stores one.
+    async fn own(&self, hit: &SearchHit) -> Option<Arc<str>> {
+        match hit.chunk() {
+            Some(chunk) => self.stored(chunk).await,
+            None => None,
+        }
+    }
+
+    /// The stored text of the chunk at `chunk`, if its segment stores one.
+    async fn stored(&self, chunk: &ChunkAt) -> Option<Arc<str>> {
+        let segment = self
+            .manifest
+            .shards()
+            .values()
+            .flat_map(ShardEntry::segments)
+            .find(|segment| segment.id() == &chunk.segment)?;
+        let loader = self.sources.loader;
+        let found = async {
+            let Some(index) = loader.text_index(segment).await? else {
+                return Ok(None);
+            };
+            loader.stored_text(segment, &index, chunk.row).await
+        };
+        match found.await {
+            Ok(text) => text,
+            Err(error) => {
+                let error: crate::Error = error;
+                warn!(segment = %chunk.segment, %error, "a chunk's stored text could not be read");
+                None
+            }
+        }
     }
 
     fn known(&mut self, reference: &SourceRef) -> Option<Arc<str>> {

@@ -7,10 +7,11 @@ use crate::{
     ModelId, Result, SegmentFileName, SegmentId, ShardId,
 };
 
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
+const RECORD_FORMAT: u32 = 1;
 
-fn check_format(format: u32) -> Result<()> {
-    if format == FORMAT {
+fn check_format(format: u32, expected: u32) -> Result<()> {
+    if format == expected {
         Ok(())
     } else {
         Err(Error::UnsupportedFormat { format })
@@ -22,9 +23,9 @@ struct FormatHeader {
     format: u32,
 }
 
-fn check_encoded_format(bytes: &[u8]) -> Result<()> {
+fn check_encoded_format(bytes: &[u8], expected: u32) -> Result<()> {
     let header: FormatHeader = serde_json::from_slice(bytes).map_err(Error::ManifestJson)?;
-    check_format(header.format)
+    check_format(header.format, expected)
 }
 
 fn invalid(reason: impl Into<String>) -> Error {
@@ -236,6 +237,8 @@ pub struct Manifest {
     commit_id: CommitId,
     data_location: Location,
     file_source: FileSource,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    stored_text: bool,
     shards: BTreeMap<ShardId, ShardEntry>,
     model_ids: BTreeSet<ModelId>,
 }
@@ -248,8 +251,38 @@ struct ManifestFields {
     commit_id: CommitId,
     data_location: Location,
     file_source: FileSource,
+    #[serde(default)]
+    stored_text: bool,
     shards: BTreeMap<ShardId, ShardEntry>,
     model_ids: BTreeSet<ModelId>,
+}
+
+/// How an index is built, chosen when it is created and kept by every version after.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IndexOptions {
+    stored_text: bool,
+}
+
+impl IndexOptions {
+    /// The options of an index created without any: no stored text.
+    pub fn new() -> Self {
+        IndexOptions::default()
+    }
+
+    /// Stores the text of each chunk that cannot be read back by a byte range, such as a PDF
+    /// page or a docx paragraph, with its segment, so reading it needs no parse of its file.
+    /// The index then holds document text at rest.
+    #[must_use]
+    pub fn stored_text(mut self, stored: bool) -> Self {
+        self.stored_text = stored;
+        self
+    }
+
+    /// Whether the index stores the text of chunks that cannot be read by a byte range.
+    pub fn has_stored_text(&self) -> bool {
+        self.stored_text
+    }
 }
 
 impl TryFrom<ManifestFields> for Manifest {
@@ -263,6 +296,7 @@ impl TryFrom<ManifestFields> for Manifest {
             commit_id: fields.commit_id,
             data_location: fields.data_location,
             file_source: fields.file_source,
+            stored_text: fields.stored_text,
             shards: fields.shards,
             model_ids: fields.model_ids,
         };
@@ -283,6 +317,27 @@ impl Manifest {
         data_location: Location,
         file_source: FileSource,
     ) -> Result<Self> {
+        Manifest::first_with(
+            index_id,
+            commit_id,
+            data_location,
+            file_source,
+            IndexOptions::new(),
+        )
+    }
+
+    /// The first manifest of a new index built with `options`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the fixed first shard id is not valid, which is a bug.
+    pub fn first_with(
+        index_id: IndexId,
+        commit_id: CommitId,
+        data_location: Location,
+        file_source: FileSource,
+        options: IndexOptions,
+    ) -> Result<Self> {
         let shard = ShardEntry::new(KeyRange::all(), Vec::new());
         Ok(Manifest {
             format: FORMAT,
@@ -291,6 +346,7 @@ impl Manifest {
             commit_id,
             data_location,
             file_source,
+            stored_text: options.stored_text,
             shards: BTreeMap::from([(ShardId::new("0")?, shard)]),
             model_ids: BTreeSet::new(),
         })
@@ -315,6 +371,7 @@ impl Manifest {
             commit_id,
             data_location: self.data_location.clone(),
             file_source: self.file_source,
+            stored_text: self.stored_text,
             shards,
             model_ids,
         };
@@ -323,7 +380,7 @@ impl Manifest {
     }
 
     fn validate(&self) -> Result<()> {
-        check_format(self.format)?;
+        check_format(self.format, FORMAT)?;
         self.validate_coverage()?;
         for (shard_id, shard) in &self.shards {
             let mut seen = BTreeSet::new();
@@ -398,6 +455,13 @@ impl Manifest {
     /// How files reach this index.
     pub fn file_source(&self) -> FileSource {
         self.file_source
+    }
+
+    /// The options the index was created with.
+    pub fn options(&self) -> IndexOptions {
+        IndexOptions {
+            stored_text: self.stored_text,
+        }
     }
 
     /// The shards, by id.
@@ -496,7 +560,7 @@ impl ManifestObject {
     /// Returns [`Error::ManifestJson`] if the bytes do not decode or the contents are
     /// inconsistent.
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        check_encoded_format(bytes)?;
+        check_encoded_format(bytes, FORMAT)?;
         serde_json::from_slice(bytes).map_err(Error::ManifestJson)
     }
 
@@ -536,7 +600,7 @@ impl ManifestPointer {
     /// A pointer to `version`.
     pub fn new(version: ManifestVersion) -> Self {
         ManifestPointer {
-            format: FORMAT,
+            format: RECORD_FORMAT,
             version,
         }
     }
@@ -561,7 +625,7 @@ impl ManifestPointer {
     ///
     /// Returns an error for bytes that do not decode or an unknown format.
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        check_encoded_format(bytes)?;
+        check_encoded_format(bytes, RECORD_FORMAT)?;
         serde_json::from_slice(bytes).map_err(Error::ManifestJson)
     }
 }
@@ -577,7 +641,7 @@ impl IndexRecord {
     /// A record naming `index_id`.
     pub fn new(index_id: IndexId) -> Self {
         IndexRecord {
-            format: FORMAT,
+            format: RECORD_FORMAT,
             index_id,
         }
     }
@@ -602,7 +666,7 @@ impl IndexRecord {
     ///
     /// Returns an error for bytes that do not decode or an unknown format.
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        check_encoded_format(bytes)?;
+        check_encoded_format(bytes, RECORD_FORMAT)?;
         serde_json::from_slice(bytes).map_err(Error::ManifestJson)
     }
 }
@@ -678,6 +742,40 @@ mod tests {
     }
 
     #[test]
+    fn stored_text_is_kept_by_successors_and_an_older_format_is_refused() {
+        let manifest = Manifest::first_with(
+            IndexId::new("idx").unwrap(),
+            CommitId::new("c1").unwrap(),
+            "s3://example-bucket/docs/".parse().unwrap(),
+            FileSource::Listing,
+            IndexOptions::new().stored_text(true),
+        )
+        .unwrap();
+        let encoded = String::from_utf8(manifest.encode().unwrap()).unwrap();
+        assert!(encoded.contains(r#""stored_text":true"#), "{encoded}");
+        let next = manifest
+            .successor(
+                CommitId::new("c2").unwrap(),
+                manifest.shards().clone(),
+                BTreeSet::new(),
+            )
+            .unwrap();
+        assert!(next.options().has_stored_text());
+        let older = r#"{"kind":"manifest","format":1,"version":1,"index_id":"idx","commit_id":"c1","data_location":"s3://example-bucket/docs/","file_source":"listing","shards":{"0":{"range":{"start":"","end":null},"segments":[]}},"model_ids":[]}"#;
+        let err = ManifestObject::decode(older.as_bytes()).unwrap_err();
+        assert!(
+            matches!(err, Error::UnsupportedFormat { format: 1 }),
+            "{err}"
+        );
+        let without = older.replace(r#""format":1"#, r#""format":2"#);
+        let ManifestObject::Manifest(decoded) = ManifestObject::decode(without.as_bytes()).unwrap()
+        else {
+            panic!("a manifest");
+        };
+        assert!(!decoded.options().has_stored_text());
+    }
+
+    #[test]
     fn manifest_and_stub_round_trip() {
         let manifest = first();
         let decoded = ManifestObject::decode(&manifest.encode().unwrap()).unwrap();
@@ -719,7 +817,7 @@ mod tests {
         let seg =
             json!({"id": "s1", "level": "L1", "built_by": built_by, "model_id": null, "files": []});
         let cases = [
-            ("/format", json!(2)),
+            ("/format", json!(1)),
             ("/version", json!(0)),
             ("/kind", json!("other")),
             ("/shards", json!({})),
@@ -751,10 +849,10 @@ mod tests {
 
     #[test]
     fn a_future_format_is_reported_even_if_its_shape_changed() {
-        let future = br#"{"kind": "manifest_v2", "format": 2, "everything": "different"}"#;
+        let future = br#"{"kind": "manifest_v3", "format": 3, "everything": "different"}"#;
         let err = ManifestObject::decode(future).unwrap_err();
         assert!(
-            matches!(err, Error::UnsupportedFormat { format: 2 }),
+            matches!(err, Error::UnsupportedFormat { format: 3 }),
             "{err}"
         );
         assert!(!err.is_damaged_data());
@@ -799,8 +897,8 @@ mod tests {
     fn on_disk_forms_are_stable() {
         let manifest = first();
         insta::assert_snapshot!(serde_json::to_string(&segment("s1", None)).unwrap(), @r#"{"id":"s1","level":"L1","built_by":{"index":"bm25","extractors":["pdf"]},"model_id":null,"files":[{"name":"lex-s1.bin","size":42}]}"#);
-        insta::assert_snapshot!(String::from_utf8(manifest.encode().unwrap()).unwrap(), @r#"{"kind":"manifest","format":1,"version":1,"index_id":"idx","commit_id":"c1","data_location":"s3://example-bucket/docs/","file_source":"listing","shards":{"0":{"range":{"start":"","end":null},"segments":[]}},"model_ids":[]}"#);
-        insta::assert_snapshot!(String::from_utf8(manifest.stub().encode().unwrap()).unwrap(), @r#"{"kind":"stub","format":1,"version":1,"index_id":"idx","commit_id":"c1"}"#);
+        insta::assert_snapshot!(String::from_utf8(manifest.encode().unwrap()).unwrap(), @r#"{"kind":"manifest","format":2,"version":1,"index_id":"idx","commit_id":"c1","data_location":"s3://example-bucket/docs/","file_source":"listing","shards":{"0":{"range":{"start":"","end":null},"segments":[]}},"model_ids":[]}"#);
+        insta::assert_snapshot!(String::from_utf8(manifest.stub().encode().unwrap()).unwrap(), @r#"{"kind":"stub","format":2,"version":1,"index_id":"idx","commit_id":"c1"}"#);
         insta::assert_snapshot!(String::from_utf8(ManifestPointer::new(ManifestVersion::FIRST).encode().unwrap()).unwrap(), @r#"{"format":1,"version":1}"#);
         insta::assert_snapshot!(String::from_utf8(IndexRecord::new(IndexId::new("idx").unwrap()).encode().unwrap()).unwrap(), @r#"{"format":1,"index_id":"idx"}"#);
     }

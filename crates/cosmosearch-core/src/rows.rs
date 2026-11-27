@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use crate::SegmentId;
 
+const RANGE_BYTES: usize = 40;
+
 /// A set of chunk rows of one segment, kept as ranges since a file's chunks are adjacent.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RowSet {
@@ -14,6 +16,14 @@ impl RowSet {
     /// An empty set.
     pub fn new() -> Self {
         RowSet::default()
+    }
+
+    /// About how many bytes the set holds in memory.
+    pub fn heap_bytes(&self) -> usize {
+        self.ranges
+            .len()
+            .saturating_mul(RANGE_BYTES)
+            .saturating_add(size_of::<Self>())
     }
 
     /// Adds `rows`.

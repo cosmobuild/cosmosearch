@@ -48,13 +48,13 @@ mod engine;
 mod indexing;
 
 pub use cosmosearch_core::{
-    Budget, ETag, FileSource, Filter, IndexId, Location, Locator, ManifestVersion, Query, Scope,
-    ShardId, SourceRef, Status,
+    Budget, ETag, FileSource, Filter, IndexId, IndexOptions, Location, Locator, ManifestVersion,
+    Query, Scope, ShardId, SourceRef, Status,
 };
 pub use cosmosearch_format::{FileEntry, FileReason, FileStatus};
 pub use cosmosearch_query::{
-    Boost, Coverage, Error, Plugin, Reading, RerankFailure, Reranking, Result, SearchHit,
-    SearchRequest, SearchResults, Snippet,
+    Boost, Coverage, DEFAULT_TABLE_BUDGET, Error, Plugin, Reading, RerankFailure, Reranking,
+    Result, SearchHit, SearchRequest, SearchResults, Snippet, TableCache,
 };
 pub use cosmosearch_store::{CreateOutcome, DataStore, MetadataStore};
 pub use engine::{Engine, EngineBuilder};

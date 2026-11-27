@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use cosmosearch_core::{Filter, Scope, ShardId};
-use cosmosearch_format::{FileEntry, FileReason, FileStatus, FileTable};
+use cosmosearch_format::{FileReason, FileState, FileStatus, FileTable};
 
 /// How many files of a file table in a search's scope that pass its filter are in each state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -20,8 +20,17 @@ impl Counts {
         let mut counts = Counts::default();
         for file in table.iter() {
             if scope.contains(file.key()) && filter.matches(file.attributes(), file.modified()) {
-                counts.count(file);
+                counts.count(file.status(), file.reason(), file.unread_parts());
             }
+        }
+        counts
+    }
+
+    /// Every file of `states`, by state.
+    pub(crate) fn of_states(states: &[FileState]) -> Self {
+        let mut counts = Counts::default();
+        for state in states {
+            counts.count(state.status(), state.reason(), state.unread_parts());
         }
         counts
     }
@@ -30,9 +39,9 @@ impl Counts {
         clippy::wildcard_enum_match_arm,
         reason = "a file state added later counts as not searched until coverage decides on it"
     )]
-    fn count(&mut self, file: &FileEntry) {
-        let stale = matches!(file.reason(), Some(FileReason::SourceMoved));
-        let slot = match file.status() {
+    fn count(&mut self, status: FileStatus, reason: Option<FileReason>, unread_parts: u32) {
+        let stale = matches!(reason, Some(FileReason::SourceMoved));
+        let slot = match status {
             FileStatus::Ready => &mut self.searched,
             FileStatus::Pending if stale => &mut self.stale,
             FileStatus::Failed => &mut self.failed,
@@ -40,7 +49,7 @@ impl Counts {
             _ => &mut self.pending,
         };
         *slot = slot.saturating_add(1);
-        if file.status() == FileStatus::Ready && file.unread_parts() > 0 {
+        if status == FileStatus::Ready && unread_parts > 0 {
             self.partly = self.partly.saturating_add(1);
         }
     }
@@ -147,6 +156,8 @@ impl Coverage {
 #[cfg(test)]
 mod tests {
     use cosmosearch_core::{AttributeValue, Attributes, ETag, ExtractFailure, ManifestVersion};
+
+    use cosmosearch_format::FileEntry;
 
     use super::*;
 

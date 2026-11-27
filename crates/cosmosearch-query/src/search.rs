@@ -4,16 +4,17 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use cosmosearch_core::{
-    AllowedRows, ExtractorProfile, Filter, Hit, IndexError, IndexKind, Level, Locator, Manifest,
-    ManifestVersion, Scope, SegmentEntry, SegmentId, ShardEntry, ShardId, SourceRef, Status, Usage,
+    AllowedRows, ExtractorProfile, Filter, Hit, Hits, IndexError, IndexKind, Level, Locator,
+    Manifest, ManifestVersion, RowSet, Scope, SegmentEntry, SegmentId, ShardEntry, ShardId,
+    SourceRef, Status, Usage,
 };
-use cosmosearch_format::{ChunkTable, FileEntry, FileTable};
+use cosmosearch_format::{ChunkGroup, ChunkIndex, FileEntry, FileGroup, FileTable};
 use futures_util::{StreamExt, TryStreamExt, future, stream};
 
 use crate::boost;
 use crate::coverage::Counts;
 use crate::fuse::{self, Fusion};
-use crate::tables::{self, Loader};
+use crate::tables::{Loader, ShardFiles, Summary};
 use crate::{Boost, Coverage, Plugins, Reranking, Result, SearchRequest, Snippet};
 
 const LOAD_CONCURRENCY: usize = 8;
@@ -42,6 +43,14 @@ pub struct SearchHit {
     heading_path: Vec<String>,
     display_name: Option<String>,
     snippet: Option<Snippet>,
+    chunk: Option<ChunkAt>,
+}
+
+/// The segment and row of the chunk a hit was found at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChunkAt {
+    pub(crate) segment: SegmentId,
+    pub(crate) row: usize,
 }
 
 impl SearchHit {
@@ -109,6 +118,11 @@ impl SearchHit {
         self.snippet.as_ref()
     }
 
+    /// The chunk the hit was found at, if the search knows it.
+    pub(crate) fn chunk(&self) -> Option<&ChunkAt> {
+        self.chunk.as_ref()
+    }
+
     pub(crate) fn set_snippet(&mut self, snippet: Snippet) {
         self.snippet = Some(snippet);
     }
@@ -134,6 +148,7 @@ impl fmt::Debug for SearchHit {
                 &self.display_name.as_ref().map(String::len),
             )
             .field("snippet", &self.snippet)
+            .field("chunk", &self.chunk)
             .finish()
     }
 }
@@ -312,12 +327,40 @@ pub(crate) struct Searched {
     pub(crate) counts: Counts,
 }
 
-/// Where a found chunk's file is: its shard's file table, and its ordinal and content version
-/// there.
+/// Where a found chunk's file is: its shard, the shard's file table, and its ordinal and
+/// content version there.
 struct Place {
-    table: Arc<FileTable>,
+    shard: ShardId,
+    file: FileEntry,
     file_ordinal: u64,
     content_version: ManifestVersion,
+}
+
+/// The file entries a search has read: whole file tables of the shards it filters, and the
+/// groups holding the files of its hits elsewhere.
+#[derive(Default)]
+struct Files {
+    tables: BTreeMap<ShardId, Arc<FileTable>>,
+    groups: BTreeMap<ShardId, Vec<Arc<FileGroup>>>,
+}
+
+impl Files {
+    fn entry(&self, shard: &ShardId, ordinal: u64) -> Option<&FileEntry> {
+        match self.tables.get(shard) {
+            Some(table) => table.by_ordinal(ordinal),
+            None => self
+                .groups
+                .get(shard)?
+                .iter()
+                .find_map(|group| group.by_ordinal(ordinal)),
+        }
+    }
+}
+
+/// The segment and row a passage was first found at.
+struct Candidate {
+    segment: SegmentId,
+    row: usize,
 }
 
 impl Searchable {
@@ -325,27 +368,27 @@ impl Searchable {
     fn holds(&self, place: &Place) -> bool {
         self.holders
             .iter()
-            .any(|holder| Arc::ptr_eq(&holder.files, &place.table))
+            .any(|holder| holder.shard == place.shard)
             && !self
-                .chunks
+                .index
                 .file_rows(place.file_ordinal, place.content_version)
                 .is_empty()
     }
 }
 
-/// A segment to search, with its chunk records and the file tables of the shards that hold it.
+/// A segment to search, with its chunk index and the file tables of the shards that hold it.
 struct Searchable {
     entry: SegmentEntry,
-    chunks: Arc<ChunkTable>,
+    index: Arc<ChunkIndex>,
     holders: Vec<Holder>,
 }
 
-/// The file table of a shard holding a segment, the segment it was read from, if any, and
-/// whether the search's scope holds the shard's whole key range.
+/// A shard holding a segment, the summary of its file table, and whether the search's scope
+/// holds the shard's whole key range.
 #[derive(Clone)]
 struct Holder {
-    files_segment: Option<SegmentId>,
-    files: Arc<FileTable>,
+    shard: ShardId,
+    files: ShardFiles,
     whole: bool,
 }
 
@@ -429,27 +472,30 @@ pub(crate) async fn run(
         .collect();
     let loading: Vec<_> = shards
         .iter()
-        .map(|(id, shard)| load_files(loader, id, shard))
+        .map(|(id, shard)| load_summary(loader, id, shard))
         .collect();
-    let files: BTreeMap<&ShardId, Arc<FileTable>> = stream::iter(loading)
+    let summaries: BTreeMap<&ShardId, ShardFiles> = stream::iter(loading)
         .buffer_unordered(LOAD_CONCURRENCY)
         .try_collect()
         .await?;
-    let (covered, counts) = counted(loader, &shards, &files, scope, filter).await;
+    let partial = shards
+        .iter()
+        .filter(|(_, shard)| !filter.is_empty() || !scope.covers(shard.range()));
+    let mut files = Files {
+        tables: load_tables(loader, partial).await?,
+        groups: BTreeMap::new(),
+    };
+    let (covered, counts) = counted(&shards, &summaries, &files.tables, scope, filter);
 
-    let searchable = searchable(loader, &shards, &files, scope).await?;
+    let searchable = searchable(loader, &shards, &summaries, scope).await?;
 
-    let allowed = allowed_rows(loader, &searchable, scope, filter).await;
+    let allowed = allowed_rows(loader, &searchable, &files.tables, scope, filter).await;
     let by_kind = by_kind(&searchable, &allowed);
 
     let by_id: BTreeMap<&SegmentId, &Searchable> = searchable
         .iter()
         .map(|segment| (segment.entry.id(), segment))
         .collect();
-    let mut passages: BTreeMap<ChunkKey, SearchHit> = BTreeMap::new();
-    let mut places: BTreeMap<ChunkKey, Place> = BTreeMap::new();
-    let mut lists: Vec<(f64, Vec<ChunkKey>)> = Vec::with_capacity(by_kind.len());
-    let mut kinds_segments: Vec<Vec<&Searchable>> = Vec::with_capacity(by_kind.len());
     let allowed = &allowed;
     let by_id = &by_id;
     let searches = by_kind.into_iter().filter_map(|(kind, segments)| {
@@ -467,48 +513,14 @@ pub(crate) async fn run(
             Ok::<_, IndexError>((kind, weight, found, of_kind))
         })
     });
-    let mut places_in_lists = ListPlaces::default();
-    for (kind, weight, found, of_kind) in future::try_join_all(searches).await? {
-        kinds_segments.push(of_kind);
-        *usage = usage.saturating_add(found.usage());
-        let mut hits = found.into_hits();
-        hits.sort_by(|a, b| {
-            b.score()
-                .total_cmp(&a.score())
-                .then_with(|| a.segment().cmp(b.segment()))
-                .then_with(|| a.row().cmp(&b.row()))
-        });
-        let mut list = Vec::with_capacity(hits.len());
-        let mut rank = 0;
-        for hit in hits {
-            let Some(segment) = by_id.get(hit.segment()) else {
-                continue;
-            };
-            if let Some((key, passage, place)) = resolve(segment, &hit, manifest)? {
-                places_in_lists.record(&key, kind, hit.score(), &mut rank);
-                passages.entry(key.clone()).or_insert(passage);
-                places.entry(key.clone()).or_insert(place);
-                list.push(key);
-            }
-        }
-        lists.push((weight, list));
-    }
-
-    let mut found = Vec::with_capacity(pool.min(passages.len()));
-    let covers = |list: usize, key: &ChunkKey| {
-        let (Some(segments), Some(place)) = (kinds_segments.get(list), places.get(key)) else {
-            return false;
-        };
-        segments.iter().any(|segment| segment.holds(place))
-    };
-    for (key, score) in fuse::fuse(&lists, fusion.k(), pool, covers) {
-        if let Some(mut passage) = passages.remove(&key) {
-            passage.score = score;
-            passage.boost = multiplier(boosts, places.get(&key));
-            places_in_lists.place(&key, &mut passage);
-            found.push(passage);
-        }
-    }
+    let found_lists = future::try_join_all(searches).await?;
+    add_holders(loader, &shards, by_id, &found_lists, &mut files).await?;
+    let resolved = Resolved::of(found_lists, by_id, &files, usage);
+    let fused = fuse::fuse(&resolved.lists, fusion.k(), pool, |list, key| {
+        resolved.covers(list, key)
+    });
+    let groups = load_groups(loader, by_id, &resolved.candidates, &fused).await?;
+    let found = passages(resolved, fused, &groups, by_id, boosts, manifest)?;
     Ok(Searched {
         hits: boost::choose(found, boosts, limit),
         covered,
@@ -516,13 +528,192 @@ pub(crate) async fn run(
     })
 }
 
+/// The lists of passages the index kinds found, each passage known by its key, with the row
+/// it was first found at and where its file is.
+struct Resolved<'a> {
+    candidates: BTreeMap<ChunkKey, Candidate>,
+    places: BTreeMap<ChunkKey, Place>,
+    lists: Vec<(f64, Vec<ChunkKey>)>,
+    kinds_segments: Vec<Vec<&'a Searchable>>,
+    in_lists: ListPlaces,
+}
+
+impl<'a> Resolved<'a> {
+    fn of(
+        found_lists: Vec<(&IndexKind, f64, Hits, Vec<&'a Searchable>)>,
+        by_id: &BTreeMap<&SegmentId, &Searchable>,
+        files: &Files,
+        usage: &mut Usage,
+    ) -> Self {
+        let mut resolved = Resolved {
+            candidates: BTreeMap::new(),
+            places: BTreeMap::new(),
+            lists: Vec::with_capacity(found_lists.len()),
+            kinds_segments: Vec::with_capacity(found_lists.len()),
+            in_lists: ListPlaces::default(),
+        };
+        for (kind, weight, found, of_kind) in found_lists {
+            resolved.kinds_segments.push(of_kind);
+            *usage = usage.saturating_add(found.usage());
+            let mut hits = found.into_hits();
+            hits.sort_by(|a, b| {
+                b.score()
+                    .total_cmp(&a.score())
+                    .then_with(|| a.segment().cmp(b.segment()))
+                    .then_with(|| a.row().cmp(&b.row()))
+            });
+            let mut list = Vec::with_capacity(hits.len());
+            let mut rank = 0;
+            for hit in hits {
+                let Some(segment) = by_id.get(hit.segment()) else {
+                    continue;
+                };
+                if let Some((key, candidate, place)) = resolve(segment, &hit, files) {
+                    resolved.in_lists.record(&key, kind, hit.score(), &mut rank);
+                    resolved.candidates.entry(key.clone()).or_insert(candidate);
+                    resolved.places.entry(key.clone()).or_insert(place);
+                    list.push(key);
+                }
+            }
+            resolved.lists.push((weight, list));
+        }
+        resolved
+    }
+
+    /// Whether the segments list `list` searched hold the passage `key`.
+    fn covers(&self, list: usize, key: &ChunkKey) -> bool {
+        let (Some(segments), Some(place)) = (self.kinds_segments.get(list), self.places.get(key))
+        else {
+            return false;
+        };
+        segments.iter().any(|segment| segment.holds(place))
+    }
+}
+
+/// The hits of the passages `fused` chose, each read from its group of chunk records.
+fn passages(
+    mut resolved: Resolved<'_>,
+    fused: Vec<(ChunkKey, f32)>,
+    groups: &BTreeMap<(SegmentId, usize), Arc<ChunkGroup>>,
+    by_id: &BTreeMap<&SegmentId, &Searchable>,
+    boosts: &[Boost],
+    manifest: &Manifest,
+) -> Result<Vec<SearchHit>> {
+    let mut found = Vec::with_capacity(fused.len());
+    for (key, score) in fused {
+        let (Some(candidate), Some(place)) =
+            (resolved.candidates.get(&key), resolved.places.get(&key))
+        else {
+            continue;
+        };
+        let Some(record) = by_id
+            .get(&candidate.segment)
+            .and_then(|segment| segment.index.group_of(candidate.row))
+            .and_then(|group| groups.get(&(candidate.segment.clone(), group)))
+            .and_then(|group| group.get(candidate.row))
+        else {
+            continue;
+        };
+        let Some(source) = record.source_ref(&place.file, manifest.data_location())? else {
+            continue;
+        };
+        let mut passage = SearchHit {
+            source,
+            score,
+            list_scores: Vec::new(),
+            list_ranks: Vec::new(),
+            boost: multiplier(boosts, Some(place)),
+            rerank_score: None,
+            heading_path: record.heading_path().to_vec(),
+            display_name: place.file.display_name().map(str::to_owned),
+            snippet: None,
+            chunk: Some(ChunkAt {
+                segment: candidate.segment.clone(),
+                row: candidate.row,
+            }),
+        };
+        resolved.in_lists.place(&key, &mut passage);
+        found.push(passage);
+    }
+    Ok(found)
+}
+
+/// Adds to `files` the files of the chunks `found_lists` found, reading once each group of
+/// a shard's file table that holds one, unless the whole table is read already.
+async fn add_holders(
+    loader: &Loader<'_>,
+    shards: &[(&ShardId, &ShardEntry)],
+    by_id: &BTreeMap<&SegmentId, &Searchable>,
+    found_lists: &[(&IndexKind, f64, Hits, Vec<&Searchable>)],
+    files: &mut Files,
+) -> Result<()> {
+    let by_shard: BTreeMap<&ShardId, &ShardEntry> = shards.iter().copied().collect();
+    let mut wanted: BTreeMap<(&ShardId, usize), &Arc<Summary>> = BTreeMap::new();
+    for hit in found_lists.iter().flat_map(|(_, _, found, _)| found.hits()) {
+        let Some(segment) = by_id.get(hit.segment()) else {
+            continue;
+        };
+        let (Some(holder), Some(place)) = (
+            live_holder(segment, hit),
+            usize::try_from(hit.row())
+                .ok()
+                .and_then(|row| segment.index.place(row)),
+        ) else {
+            continue;
+        };
+        if files.tables.contains_key(&holder.shard) {
+            continue;
+        }
+        let summary = &holder.files.summary;
+        if let Some(group) = summary
+            .index
+            .as_ref()
+            .and_then(|index| index.group_of(place.file_ordinal))
+        {
+            wanted.insert((&holder.shard, group), summary);
+        }
+    }
+    let loading: Vec<_> = wanted
+        .into_iter()
+        .filter_map(|((id, group), summary)| {
+            Some(load_file_group(
+                loader,
+                id,
+                by_shard.get(id)?,
+                summary,
+                group,
+            ))
+        })
+        .collect();
+    let found: Vec<Option<(ShardId, Arc<FileGroup>)>> = stream::iter(loading)
+        .buffer_unordered(LOAD_CONCURRENCY)
+        .try_collect()
+        .await?;
+    for (shard, group) in found.into_iter().flatten() {
+        files.groups.entry(shard).or_default().push(group);
+    }
+    Ok(())
+}
+
+async fn load_file_group(
+    loader: &Loader<'_>,
+    id: &ShardId,
+    shard: &ShardEntry,
+    summary: &Summary,
+    group: usize,
+) -> Result<Option<(ShardId, Arc<FileGroup>)>> {
+    let found = loader.file_group(shard, summary, group).await?;
+    Ok(found.map(|found| (id.clone(), found)))
+}
+
 /// What `boosts` multiplied together give the file of the passage at `place`.
 fn multiplier(boosts: &[Boost], place: Option<&Place>) -> f64 {
-    place
-        .and_then(|place| place.table.by_ordinal(place.file_ordinal))
-        .map_or(1.0, |file| {
-            boosts.iter().map(|boost| boost.multiplier(file)).product()
-        })
+    place.map_or(1.0, |place| {
+        boosts
+            .iter()
+            .map(|boost| boost.multiplier(&place.file))
+            .product()
+    })
 }
 
 /// Where each passage stood in each index kind's list: its score and its rank among the
@@ -574,28 +765,31 @@ fn by_kind<'a>(
 
 /// The rows of `searchable` a search may score: those live in a holder's file table whose
 /// file is in `scope` and passes `filter`. For a holder wholly in scope, without a filter,
-/// they are the rows kept for each segment and table.
+/// they are the rows kept for each segment and file table.
 async fn allowed_rows(
     loader: &Loader<'_>,
     searchable: &[Searchable],
+    tables: &BTreeMap<ShardId, Arc<FileTable>>,
     scope: &Scope,
     filter: &Filter,
 ) -> AllowedRows {
     let mut allowed = AllowedRows::new();
     for segment in searchable {
         for holder in &segment.holders {
-            let rows = match &holder.files_segment {
-                Some(files_segment) if holder.whole && filter.is_empty() => {
-                    loader
-                        .live_rows(
-                            segment.entry.id(),
-                            &segment.chunks,
-                            files_segment,
-                            &holder.files,
-                        )
-                        .await
+            let rows = if holder.whole && filter.is_empty() {
+                match (&holder.files.segment, &holder.files.summary.index) {
+                    (Some(files_segment), Some(index)) => {
+                        loader
+                            .live_rows(segment.entry.id(), &segment.index, files_segment, index)
+                            .await
+                    }
+                    (Some(_) | None, None) | (None, Some(_)) => Arc::new(RowSet::new()),
                 }
-                Some(_) | None => Arc::new(segment.chunks.rows(&holder.files, scope, filter)),
+            } else {
+                match tables.get(&holder.shard) {
+                    Some(files) => Arc::new(segment.index.rows(files, scope, filter)),
+                    None => Arc::new(RowSet::new()),
+                }
             };
             allowed.allow(segment.entry.id(), rows);
         }
@@ -603,22 +797,22 @@ async fn allowed_rows(
     allowed
 }
 
-/// The segments of `shards` an index plug-in built, each with its chunk records and the file
-/// tables of the shards that hold it; one without chunk records is left out.
+/// The segments of `shards` an index plug-in built, each with its chunk index and the
+/// shards that hold it; one without chunk records is left out.
 async fn searchable(
     loader: &Loader<'_>,
     shards: &[(&ShardId, &ShardEntry)],
-    files: &BTreeMap<&ShardId, Arc<FileTable>>,
+    summaries: &BTreeMap<&ShardId, ShardFiles>,
     scope: &Scope,
 ) -> Result<Vec<Searchable>> {
     let mut holders: BTreeMap<&SegmentId, (&SegmentEntry, Vec<Holder>)> = BTreeMap::new();
     for (id, shard) in shards {
-        let Some(table) = files.get(id) else {
+        let Some(files) = summaries.get(id) else {
             continue;
         };
         let holder = Holder {
-            files_segment: tables::files_segment(shard).map(|segment| segment.id().clone()),
-            files: Arc::clone(table),
+            shard: (*id).clone(),
+            files: files.clone(),
             whole: scope.covers(shard.range()),
         };
         for segment in shard.segments() {
@@ -633,7 +827,7 @@ async fn searchable(
     }
     let loading: Vec<_> = holders
         .into_values()
-        .map(|(entry, tables)| load_chunks(loader, entry, tables))
+        .map(|(entry, holders)| load_index(loader, entry, holders))
         .collect();
     let segments: Vec<Option<Searchable>> = stream::iter(loading)
         .buffered(LOAD_CONCURRENCY)
@@ -644,23 +838,25 @@ async fn searchable(
 
 /// The shards holding a file in `scope` that passes `filter`, and those files by state. A
 /// shard wholly in scope, without a filter, gives the counts kept for its file table.
-async fn counted(
-    loader: &Loader<'_>,
+fn counted(
     shards: &[(&ShardId, &ShardEntry)],
-    files: &BTreeMap<&ShardId, Arc<FileTable>>,
+    summaries: &BTreeMap<&ShardId, ShardFiles>,
+    tables: &BTreeMap<ShardId, Arc<FileTable>>,
     scope: &Scope,
     filter: &Filter,
 ) -> (Vec<ShardId>, Counts) {
     let mut covered = Vec::new();
     let mut total = Counts::default();
     for (id, shard) in shards {
-        let Some(table) = files.get(id) else {
+        let Some(files) = summaries.get(id) else {
             continue;
         };
-        let whole = filter.is_empty() && scope.covers(shard.range());
-        let counts = match tables::files_segment(shard) {
-            Some(segment) if whole => *loader.counts(segment.id(), table).await,
-            Some(_) | None => Counts::of(table, scope, filter),
+        let counts = if filter.is_empty() && scope.covers(shard.range()) {
+            files.summary.counts
+        } else if let Some(table) = tables.get(*id) {
+            Counts::of(table, scope, filter)
+        } else {
+            continue;
         };
         if counts.any() {
             covered.push((*id).clone());
@@ -668,6 +864,48 @@ async fn counted(
         total = total.plus(counts);
     }
     (covered, total)
+}
+
+/// The full file tables of `shards`.
+async fn load_tables<'a>(
+    loader: &Loader<'_>,
+    shards: impl Iterator<Item = &'a (&'a ShardId, &'a ShardEntry)>,
+) -> Result<BTreeMap<ShardId, Arc<FileTable>>> {
+    let loading: Vec<_> = shards
+        .map(|(id, shard)| load_table(loader, id, shard))
+        .collect();
+    stream::iter(loading)
+        .buffer_unordered(LOAD_CONCURRENCY)
+        .try_collect()
+        .await
+}
+
+/// The groups of chunk records holding the first row of each of `fused`.
+async fn load_groups(
+    loader: &Loader<'_>,
+    by_id: &BTreeMap<&SegmentId, &Searchable>,
+    candidates: &BTreeMap<ChunkKey, Candidate>,
+    fused: &[(ChunkKey, f32)],
+) -> Result<BTreeMap<(SegmentId, usize), Arc<ChunkGroup>>> {
+    let wanted: BTreeSet<(&SegmentId, usize)> = fused
+        .iter()
+        .filter_map(|(key, _)| {
+            let candidate = candidates.get(key)?;
+            let group = by_id
+                .get(&candidate.segment)?
+                .index
+                .group_of(candidate.row)?;
+            Some((&candidate.segment, group))
+        })
+        .collect();
+    let loading: Vec<_> = wanted
+        .into_iter()
+        .filter_map(|(segment, group)| Some(load_group(loader, by_id.get(segment)?, group)))
+        .collect();
+    stream::iter(loading)
+        .buffer_unordered(LOAD_CONCURRENCY)
+        .try_collect()
+        .await
 }
 
 /// How many hits each index kind is asked for: never fewer than `limit`, and at least
@@ -680,78 +918,76 @@ fn depth(limit: usize) -> usize {
     }
 }
 
-async fn load_files<'a>(
+async fn load_summary<'a>(
     loader: &Loader<'_>,
     id: &'a ShardId,
     shard: &ShardEntry,
-) -> Result<(&'a ShardId, Arc<FileTable>)> {
-    Ok((id, loader.files(shard).await?))
+) -> Result<(&'a ShardId, ShardFiles)> {
+    Ok((id, loader.summary(shard).await?))
 }
 
-async fn load_chunks(
+async fn load_table(
+    loader: &Loader<'_>,
+    id: &ShardId,
+    shard: &ShardEntry,
+) -> Result<(ShardId, Arc<FileTable>)> {
+    Ok((id.clone(), loader.files(shard).await?))
+}
+
+async fn load_index(
     loader: &Loader<'_>,
     entry: &SegmentEntry,
     holders: Vec<Holder>,
 ) -> Result<Option<Searchable>> {
-    let chunks = loader.chunks(entry).await?;
-    Ok(chunks.map(|chunks| Searchable {
+    let index = loader.index(entry).await?;
+    Ok(index.map(|index| Searchable {
         entry: entry.clone(),
-        chunks,
+        index,
         holders,
     }))
 }
 
-fn resolve(
+async fn load_group(
+    loader: &Loader<'_>,
     segment: &Searchable,
-    hit: &Hit,
-    manifest: &Manifest,
-) -> Result<Option<(ChunkKey, SearchHit, Place)>> {
-    let Ok(row) = usize::try_from(hit.row()) else {
-        return Ok(None);
+    group: usize,
+) -> Result<((SegmentId, usize), Arc<ChunkGroup>)> {
+    let found = loader.group(&segment.entry, &segment.index, group).await?;
+    Ok(((segment.entry.id().clone(), group), found))
+}
+
+/// The shard whose file table holds the chunk `hit` found as live, if one does.
+fn live_holder<'a>(segment: &'a Searchable, hit: &Hit) -> Option<&'a Holder> {
+    let place = segment.index.place(usize::try_from(hit.row()).ok()?)?;
+    segment.holders.iter().find(|holder| {
+        holder.files.summary.version(place.file_ordinal) == Some(place.content_version)
+    })
+}
+
+/// The passage `hit` found, where its file is, and the key fusion knows it by, if its chunk
+/// is live in a shard holding the segment.
+fn resolve(segment: &Searchable, hit: &Hit, files: &Files) -> Option<(ChunkKey, Candidate, Place)> {
+    let row = usize::try_from(hit.row()).ok()?;
+    let place = segment.index.place(row)?;
+    let shard = &live_holder(segment, hit)?.shard;
+    let file = files.entry(shard, place.file_ordinal)?;
+    let key = ChunkKey {
+        key: file.key().to_owned(),
+        content_version: place.content_version,
+        profile: place.profile.clone(),
+        position: place.position,
     };
-    let Some(record) = segment.chunks.get(row) else {
-        return Ok(None);
+    let candidate = Candidate {
+        segment: segment.entry.id().clone(),
+        row,
     };
-    let first = segment.chunks.neighbours(row, row, 0).start;
-    let Some(position) = row.checked_sub(first) else {
-        return Ok(None);
+    let place = Place {
+        shard: shard.clone(),
+        file: file.clone(),
+        file_ordinal: place.file_ordinal,
+        content_version: place.content_version,
     };
-    for holder in &segment.holders {
-        if let Some(source) =
-            segment
-                .chunks
-                .source_ref(row, &holder.files, manifest.data_location())?
-        {
-            let key = ChunkKey {
-                key: source.location().key().to_owned(),
-                content_version: record.content_version(),
-                profile: record.profile().clone(),
-                position,
-            };
-            let passage = SearchHit {
-                source,
-                score: hit.score(),
-                list_scores: Vec::new(),
-                list_ranks: Vec::new(),
-                boost: 1.0,
-                rerank_score: None,
-                heading_path: record.heading_path().to_vec(),
-                display_name: holder
-                    .files
-                    .by_ordinal(record.file_ordinal())
-                    .and_then(FileEntry::display_name)
-                    .map(str::to_owned),
-                snippet: None,
-            };
-            let place = Place {
-                table: Arc::clone(&holder.files),
-                file_ordinal: record.file_ordinal(),
-                content_version: record.content_version(),
-            };
-            return Ok(Some((key, passage, place)));
-        }
-    }
-    Ok(None)
+    Some((key, candidate, place))
 }
 
 #[cfg(test)]

@@ -9,7 +9,9 @@ use cosmosearch_core::{
     SharedReranker, SharedResults, SourceRef,
 };
 use cosmosearch_format::FileEntry;
-use cosmosearch_query::{Plugins, Reader, ReaderOptions, Reading, SearchRequest, SearchResults};
+use cosmosearch_query::{
+    Plugins, Reader, ReaderOptions, Reading, SearchRequest, SearchResults, TableCache,
+};
 use cosmosearch_store::{DataStore, MetadataStore};
 
 use crate::Result;
@@ -50,6 +52,13 @@ impl Engine {
     /// drop its engines and purge this id from the cache.
     pub fn index_id(&self) -> &IndexId {
         self.reader.index_id()
+    }
+
+    /// About how many bytes of decoded index tables this engine holds: what it keeps for
+    /// every search, and the tables of its index in its table cache, which engines of the
+    /// same index sharing the cache share.
+    pub fn resident_bytes(&self) -> u64 {
+        self.reader.resident_bytes()
     }
 
     /// The extractors this engine has, built in or added.
@@ -312,7 +321,8 @@ impl EngineBuilder {
     }
 
     /// Gives each hit a snippet, its passage with the query's words marked, reading at most
-    /// `max_files` files for them in one search; zero, the default, gives none.
+    /// `max_files` files for them in one search; zero, the default, gives none. A hit whose
+    /// chunk has stored text takes it from the index instead, outside that count.
     #[must_use]
     pub fn snippets(mut self, max_files: usize) -> Self {
         self.options = self.options.snippets(max_files);
@@ -333,6 +343,16 @@ impl EngineBuilder {
     #[must_use]
     pub fn heat(mut self, heat: impl HeatSink + 'static) -> Self {
         self.options = self.options.heat(SharedHeat::new(heat));
+        self
+    }
+
+    /// Keeps the file tables and chunk records this engine decodes for hits, scopes and filters
+    /// in `tables`, such as a clone of one `TableCache` that every engine of the process
+    /// shares under one budget. Without it, each engine has its own cache of
+    /// [`DEFAULT_TABLE_BUDGET`](crate::DEFAULT_TABLE_BUDGET) bytes.
+    #[must_use]
+    pub fn table_cache(mut self, tables: TableCache) -> Self {
+        self.options = self.options.tables(tables);
         self
     }
 

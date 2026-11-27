@@ -61,8 +61,8 @@ files produce new segments, and nothing is edited in place. A segment can hold:
 
 | File | Contents |
 | --- | --- |
-| `meta-<id>.parquet` | The file table: key, size, ETag, status, media type, modified time, attributes |
-| `chunks-<id>.parquet` | One record per chunk: where it is in its file, its headings, its hash |
+| `meta-<id>.bin` | The file table: key, size, ETag, status, media type, modified time, attributes. Files are kept in Parquet groups of 512 by ordinal, followed by an index of each file's ordinal, content version, state and key hash and of where each group is |
+| `chunks-<id>.bin` | One record per chunk: where it is in its file, its headings, its hash. Records are kept in Parquet groups of 512 rows, followed by an index of where each file's chunks and each group are |
 | `lex-<id>.bin` | The BM25 keyword index (tantivy's files bundled into one object) |
 | `ivf-<id>.bin` | The vector index: centroids, cluster table, binary and int8 vectors |
 
@@ -195,9 +195,23 @@ flowchart LR
 4. **Publish** commits the segment.
 
 Extraction runs per file, so you can isolate it in its own process and a file that crashes
-the process takes down only itself. Its output goes back to you as a plain value; the
-library stores no extracted text anywhere. `index::index_pending` runs all four steps in one
-process for the common case.
+the process takes down only itself. Its output goes back to you as a plain value. By
+default the library stores no extracted text anywhere. `index::index_pending` runs all four
+steps in one process for the common case.
+
+**Stored text.** An index created with `IndexOptions::new().stored_text(true)` (through
+`MetadataStore::create_with`) also keeps, with each segment, the text of every chunk that
+can't be read back by a byte range: PDF pages, Word paragraphs, CSV rows and JSON values.
+The build writes it from the extraction it already ran, in `text-<id>.bin`, in compressed
+groups of 64 chunks, and it goes when its segment goes. Keyword and vector segments each
+store their own copy, so an index with vectors keeps the text twice. `read`, `expand`,
+`chunks`, snippets and reranking then read that text by range instead of reading and
+parsing the file, and a snippet or reranked passage is the hit's own chunk rather than its
+whole page. Where a chunk has no stored text, such as in a segment built without it, or
+reading it fails, they read and extract the file as before. A read still checks with one
+request that the file is the version indexed, and refuses a changed or deleted file as
+stale. Stored text is document text at rest in the metadata location, so protect that
+location as you protect the files.
 
 Jobs are safe to repeat and safe to run late. A job's result for a file is applied only if
 the file is still pending at the version the job planned for. If the file changed or was
@@ -213,7 +227,8 @@ can quote document text; [SECURITY.md](../SECURITY.md) says how to keep it out o
 logs. Code in the same process can't survive running out of memory, so if you index files
 you don't trust, run the extract step in a separate process with memory and time limits.
 The engine extracts files again to read passages back (for `read`, `expand`, `chunks`,
-snippets and reranking), so the same applies to the process that serves searches.
+snippets and reranking), unless the index stores their text, so the same applies to the
+process that serves searches.
 
 **Chunks** follow the structure of each format: headings and paragraphs for text, Markdown
 and HTML, pages for PDF, document elements for docx, records for CSV and values for JSON.
@@ -343,7 +358,8 @@ set a smaller shard size, or embed chosen files with `plan_embedding`.
 
 ## Caching
 
-All caches are optional, bounded, and shared by every engine you hand them to.
+All caches are bounded and shared by every engine you hand them to. All but the table
+cache are optional.
 
 - **`Cache`** keeps index files in memory and, optionally, on disk. It cuts them into
   aligned blocks (64 KiB by default), fetches only missing blocks, and fetches a block once
@@ -352,6 +368,16 @@ All caches are optional, bounded, and shared by every engine you hand them to.
 - **`SearchCache`** keeps whole search results, keyed by the manifest version and everything
   that affects the result. A commit makes older results unreachable.
 - **`TextCache`** keeps passage text, keyed by ref, for snippets and reranking.
+- **`TableCache`** keeps decoded file tables and groups of files and chunk records under a
+  byte budget, and drops the least recently used first. A search reads whole file tables
+  only for shards that a scope or filter cuts, and otherwise reads only the group holding
+  each hit's file and the group holding each hit's record. Each engine has its own cache of
+  64 MiB unless you give engines one to share. Besides it, an engine keeps the index of
+  each file table and chunk file, so a search over whole shards with no filter decides
+  which chunks are live without decoding any table, and a read finds its file by key.
+  `Engine::resident_bytes` says how much an engine holds, counting the tables of its index
+  in the cache, which engines of one index sharing a cache share. A table larger than the
+  whole budget is not kept, so each search that needs it reads it again.
 
 Results and passages contain document text, so neither is returned after a lifetime you set.
 An expired entry leaves memory when it is next looked up or when a later entry is kept. To

@@ -42,6 +42,7 @@ mod request;
 mod rerank;
 mod search;
 mod snippet;
+mod table_cache;
 mod tables;
 
 pub use boost::Boost;
@@ -54,3 +55,4 @@ pub use request::SearchRequest;
 pub use rerank::{RerankFailure, Reranking};
 pub use search::{SearchHit, SearchResults};
 pub use snippet::Snippet;
+pub use table_cache::{DEFAULT_TABLE_BUDGET, TableCache};

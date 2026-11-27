@@ -449,7 +449,7 @@ impl Indexer {
 
     async fn write_table(&self, table: &FileTable) -> Result<SegmentEntry> {
         let id = SegmentId::new(new_commit_id()?.as_str())?;
-        let name = SegmentFileName::new(format!("meta-{id}.parquet"))?;
+        let name = SegmentFileName::new(format!("meta-{id}.bin"))?;
         let body = Bytes::from(table.encode()?);
         let size = u64::try_from(body.len()).unwrap_or(u64::MAX);
         self.index.write_segment_file(&id, &name, body).await?;

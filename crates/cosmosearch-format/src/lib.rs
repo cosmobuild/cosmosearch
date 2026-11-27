@@ -13,9 +13,13 @@
 
 mod chunks;
 mod error;
+mod grouped;
 mod stored;
 mod table;
+mod text;
 
-pub use chunks::{ChunkRecord, ChunkTable};
+pub use chunks::{ChunkGroup, ChunkIndex, ChunkPlace, ChunkRecord, ChunkTable};
 pub use error::{EncodingError, Error, Result};
-pub use table::{FileEntry, FileReason, FileStatus, FileTable};
+pub use grouped::TRAILER_BYTES;
+pub use table::{FileEntry, FileGroup, FileIndex, FileReason, FileState, FileStatus, FileTable};
+pub use text::{TextGroup, TextIndex, TextTable};

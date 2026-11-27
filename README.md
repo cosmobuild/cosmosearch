@@ -38,6 +38,8 @@ If the index is lost or damaged, you delete it and build it again from the files
 - Embedding and reranking models that run locally on the CPU, or any OpenAI-compatible
   embedding API and `/rerank` API over HTTP.
 - Results that cite a file, a byte range or page, and the file version they were read from.
+- Stored text on request: an index can keep the text of PDF, Word, CSV and JSON passages,
+  so reading a hit's passage reads a small part of the index instead of parsing its file.
   Reading a result back fails if the file has changed since.
 - Search scopes (only these prefixes), filters on your own attributes (values, numbers and
   times, by value or range) and on modified time, boosts for matching or recent files, and
@@ -123,12 +125,18 @@ None are on by default.
 
 ## Limits
 
-- **Size.** A search without a scope covers every segment of the index and keeps each
-  segment's file and chunk tables in memory. For large corpora, use search scopes.
+- **Size.** A search without a scope covers every segment of the index, and each segment it
+  searches costs reads and time. An engine keeps a small index of each file table and chunk
+  file, and keeps the tables it decodes in a cache under a byte budget. While a call runs it
+  also holds what it read: a search with a scope or filter holds the whole file table of
+  each shard it cuts, and reads that table again if it is larger than the budget. For large
+  corpora, use search scopes.
 - **Untrusted files.** Text extraction runs inside your process, both when indexing and when
   the engine reads text back (`read`, `expand`, `chunks`, snippets and reranking), and a
-  crafted PDF can use a lot of memory and time. If you index files you don't trust, run both in
-  separate processes; [SECURITY.md](https://github.com/cosmobuild/cosmosearch/blob/main/SECURITY.md)
+  crafted PDF can use a lot of memory and time. An index created with stored text reads
+  most PDF, Word, CSV and JSON passages from the index instead, but still extracts a file
+  when its text isn't there. If you index files you don't trust, run both in separate
+  processes; [SECURITY.md](https://github.com/cosmobuild/cosmosearch/blob/main/SECURITY.md)
   has the details.
 - **Text encoding and scans.** Text must be UTF-8. Scanned PDF pages are not read; results
   report a file with some scanned pages as only partly searched, and a fully scanned file as

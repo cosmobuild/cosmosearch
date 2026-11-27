@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use cosmosearch_core::{
-    Query, RerankError, RerankScores, SharedReranker, SourceRef, Usage, indexed_text,
-};
+use cosmosearch_core::{Query, RerankError, RerankScores, SharedReranker, Usage, indexed_text};
 use thiserror::Error;
 use tokio::time::Instant;
 use tracing::warn;
@@ -76,8 +74,8 @@ pub(crate) async fn run(
 ) -> Result<(Vec<SearchHit>, Reranking, Usage)> {
     let rest = hits.split_off(shortlist.min(hits.len()));
     let mut shortlisted = hits;
-    let references: Vec<&SourceRef> = shortlisted.iter().map(SearchHit::source).collect();
-    let Some(texts) = deadline::within(deadline, passages.texts(&references, usize::MAX)).await
+    let shortlist_hits: Vec<&SearchHit> = shortlisted.iter().collect();
+    let Some(texts) = deadline::within(deadline, passages.texts(&shortlist_hits, usize::MAX)).await
     else {
         shortlisted.extend(rest);
         return Ok((shortlisted, Reranking::OutOfTime, Usage::new()));

@@ -9,7 +9,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::Compression;
 use parquet::file::metadata::KeyValue;
-use parquet::file::properties::WriterProperties;
+use parquet::file::properties::{EnabledStatistics, WriterProperties};
 
 use crate::error::{EncodingError, malformed};
 use crate::{Error, Result};
@@ -41,6 +41,7 @@ pub(crate) fn write(
     );
     let properties = WriterProperties::builder()
         .set_compression(Compression::SNAPPY)
+        .set_statistics_enabled(EnabledStatistics::None)
         .set_key_value_metadata(Some(pairs))
         .build();
     let mut bytes = Vec::new();

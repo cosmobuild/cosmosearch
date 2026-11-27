@@ -71,8 +71,8 @@ pub use ids::{
 pub use level::Level;
 pub use location::{Location, Scheme};
 pub use manifest::{
-    BuiltBy, FileSource, IndexRecord, KeyRange, Manifest, ManifestObject, ManifestPointer,
-    ManifestStub, SegmentEntry, SegmentFile, ShardEntry,
+    BuiltBy, FileSource, IndexOptions, IndexRecord, KeyRange, Manifest, ManifestObject,
+    ManifestPointer, ManifestStub, SegmentEntry, SegmentFile, ShardEntry,
 };
 pub use media::MediaType;
 pub use passages::{PassageCache, SharedPassages};

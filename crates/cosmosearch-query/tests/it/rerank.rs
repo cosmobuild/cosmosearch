@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use cosmosearch_core::{
-    AttributeValue, FakeReranker, FileSource, Filter, Query, RerankCause, RerankError,
-    RerankScores, Reranker, RerankerIdentity, SharedReranker, Usage,
+    AttributeValue, FakeReranker, FileSource, Filter, IndexOptions, Query, RerankCause,
+    RerankError, RerankScores, Reranker, RerankerIdentity, SharedReranker, Usage,
 };
 use cosmosearch_indexer::{AttributeChange, FileChange};
 use cosmosearch_query::{
@@ -319,6 +319,29 @@ async fn the_reranker_reads_each_passage_under_its_headings() {
     let mut read = reads.1.lock().unwrap().clone();
     read.sort();
     assert_eq!(read, ["Part 1\nrefund terms", "Part 2\nrefund dates"]);
+}
+
+#[tokio::test]
+async fn with_stored_text_the_reranker_reads_each_hits_own_chunk() {
+    let f = Fixture::with_options(IndexOptions::new().stored_text(true)).await;
+    f.index(&[(
+        "docs/d.pages",
+        "refund terms\u{c}refund dates\n\nrefund window".as_bytes(),
+    )])
+    .await;
+    let reads = Reads(identity(), Arc::default());
+    let reranking = reader(&f, Some(SharedReranker::new(reads.clone())), 5).await;
+    search(&reranking, QUERY, 5).await;
+    let mut read = reads.1.lock().unwrap().clone();
+    read.sort();
+    assert_eq!(
+        read,
+        [
+            "Part 1\nrefund terms",
+            "Part 2\nrefund dates",
+            "Part 2\nrefund window"
+        ]
+    );
 }
 
 async fn owned_by_x(f: &Fixture, key: &str) {

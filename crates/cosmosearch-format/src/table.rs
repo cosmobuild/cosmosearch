@@ -5,14 +5,19 @@ use std::sync::Arc;
 use arrow_array::{Array, ArrayRef, Int64Array, StringArray, UInt32Array, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
 use bytes::Bytes;
-use cosmosearch_core::{Attributes, ETag, ExtractFailure, ManifestVersion, MediaType, Timestamp};
+use cosmosearch_core::{
+    AttributeValue, Attributes, ETag, ExtractFailure, ManifestVersion, MediaType, Timestamp,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{EncodingError, malformed};
+use crate::grouped::{self, GROUP_ROWS, Groups, slice};
 use crate::stored::{self, optional, required};
 use crate::{Error, Result};
 
-const FORMAT: u32 = 3;
+const FORMAT: u32 = 4;
+const MAGIC: [u8; 8] = *b"CSFILETB";
+const MAP_ENTRY_BYTES: usize = 48;
 const NEXT_ORDINAL: &str = "cosmosearch.next_ordinal";
 
 const ORDINAL: &str = "ordinal";
@@ -27,6 +32,7 @@ const MEDIA_TYPE: &str = "media_type";
 const MODIFIED: &str = "modified";
 const ATTRIBUTES: &str = "attributes";
 const UNREAD_PARTS: &str = "unread_parts";
+const KEY_HASH: &str = "key_hash";
 
 /// How far a file has got.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,6 +229,36 @@ impl FileEntry {
     pub fn unread_parts(&self) -> u32 {
         self.unread_parts
     }
+
+    fn heap_bytes(&self) -> usize {
+        let text = |value: &str| value.len().saturating_add(size_of::<String>());
+        let attributes: usize = self
+            .attributes
+            .iter()
+            .map(|(name, value)| {
+                let held = match value {
+                    AttributeValue::One(one) => text(one),
+                    AttributeValue::Many(many) => many.iter().map(|one| text(one)).sum(),
+                    AttributeValue::Number(_) | AttributeValue::Time(_) | _ => 0,
+                };
+                text(name)
+                    .saturating_add(held)
+                    .saturating_add(size_of::<AttributeValue>())
+                    .saturating_add(MAP_ENTRY_BYTES)
+            })
+            .sum();
+        size_of::<Self>()
+            .saturating_add(text(&self.key).saturating_mul(3))
+            .saturating_add(self.etag.as_str().len())
+            .saturating_add(self.display_name.as_deref().map_or(0, str::len))
+            .saturating_add(
+                self.media_type
+                    .as_ref()
+                    .map_or(0, |media| media.as_str().len()),
+            )
+            .saturating_add(attributes)
+            .saturating_add(MAP_ENTRY_BYTES.saturating_mul(2))
+    }
 }
 
 /// The files of one shard, by key.
@@ -324,6 +360,15 @@ impl FileTable {
         true
     }
 
+    /// About how many bytes the table holds in memory.
+    pub fn heap_bytes(&self) -> usize {
+        self.files
+            .values()
+            .map(FileEntry::heap_bytes)
+            .sum::<usize>()
+            .saturating_add(size_of::<Self>())
+    }
+
     /// The total size of the files, in bytes.
     pub fn total_size(&self) -> u64 {
         self.files
@@ -369,65 +414,32 @@ impl FileTable {
         self.files.is_empty()
     }
 
-    /// The Parquet bytes stored for this table.
+    /// The bytes stored for this table: its files in Parquet groups of up to 512 by ordinal,
+    /// then an index of each file's ordinal, content version and state and of where each
+    /// group is, then a trailer of [`TRAILER_BYTES`](crate::TRAILER_BYTES) giving the index's
+    /// length.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Encoding`](crate::Error::Encoding) if encoding fails.
     pub fn encode(&self) -> Result<Vec<u8>> {
-        let files: Vec<&FileEntry> = self.files.values().collect();
-        let attributes = files
-            .iter()
-            .map(|file| serde_json::to_string(&file.attributes))
-            .collect::<serde_json::Result<Vec<_>>>()
-            .map_err(|source| Error::Encoding(EncodingError::new(source)))?;
-        let reasons = files
-            .iter()
-            .map(|file| file.reason.as_ref().map(serde_json::to_string).transpose())
-            .collect::<serde_json::Result<Vec<_>>>()
-            .map_err(|source| Error::Encoding(EncodingError::new(source)))?;
-        let display_names: Vec<Option<&str>> = files
-            .iter()
-            .map(|file| file.display_name.as_deref())
+        let files: Vec<&FileEntry> = self
+            .keys_by_ordinal
+            .values()
+            .filter_map(|key| self.files.get(key))
             .collect();
-        let media_types: Vec<Option<&str>> = files
-            .iter()
-            .map(|file| file.media_type.as_ref().map(MediaType::as_str))
-            .collect();
-        let columns: Vec<ArrayRef> = vec![
-            Arc::new(UInt64Array::from_iter_values(
-                files.iter().map(|f| f.ordinal),
-            )),
-            Arc::new(StringArray::from_iter_values(files.iter().map(|f| &f.key))),
-            Arc::new(UInt64Array::from_iter_values(files.iter().map(|f| f.size))),
-            Arc::new(StringArray::from_iter_values(
-                files.iter().map(|f| f.etag.as_str()),
-            )),
-            Arc::new(UInt64Array::from_iter_values(
-                files.iter().map(|f| f.content_version.get()),
-            )),
-            Arc::new(StringArray::from_iter_values(
-                files.iter().map(|f| f.status.as_str()),
-            )),
-            Arc::new(StringArray::from(reasons)),
-            Arc::new(StringArray::from(display_names)),
-            Arc::new(StringArray::from(media_types)),
-            Arc::new(Int64Array::from(
-                files
-                    .iter()
-                    .map(|f| f.modified.map(Timestamp::millis))
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(StringArray::from_iter_values(attributes)),
-            Arc::new(UInt32Array::from_iter_values(
-                files.iter().map(|f| f.unread_parts),
-            )),
-        ];
-        stored::write(
-            schema(),
-            columns,
-            FORMAT,
-            vec![(NEXT_ORDINAL, self.next_ordinal.to_string())],
+        let groups = files
+            .chunks(GROUP_ROWS)
+            .map(encode_entries)
+            .collect::<Result<Vec<_>>>()?;
+        grouped::assemble(
+            &groups,
+            GROUP_ROWS,
+            |mut metadata| {
+                metadata.push((NEXT_ORDINAL, self.next_ordinal.to_string()));
+                encode_index(&files, metadata)
+            },
+            MAGIC,
         )
     }
 
@@ -435,72 +447,25 @@ impl FileTable {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::UnsupportedFormat`](crate::Error::UnsupportedFormat) for a newer format,
-    /// and an error for bytes that do not decode or a table that is inconsistent.
+    /// Returns [`Error::UnsupportedFormat`](crate::Error::UnsupportedFormat) for another
+    /// format, and an error for bytes that do not decode or a table that is inconsistent.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "taken by value like the other tables' decoders"
+    )]
     pub fn decode(bytes: Bytes) -> Result<Self> {
-        let stored = stored::read(bytes, FORMAT)?;
-        let next_ordinal = stored
-            .metadata
-            .get(NEXT_ORDINAL)
-            .and_then(|value| value.parse::<u64>().ok())
-            .ok_or_else(|| malformed("the next ordinal is missing"))?;
+        let index = FileIndex::decode(grouped::index_of(&bytes, MAGIC)?)?;
         let mut table = FileTable {
-            next_ordinal,
+            next_ordinal: index.next_ordinal,
             ..FileTable::default()
         };
-        for batch in &stored.batches {
-            let ordinals = required::<UInt64Array>(batch, ORDINAL)?;
-            let keys = required::<StringArray>(batch, KEY)?;
-            let sizes = required::<UInt64Array>(batch, SIZE)?;
-            let etags = required::<StringArray>(batch, ETAG)?;
-            let versions = required::<UInt64Array>(batch, CONTENT_VERSION)?;
-            let statuses = required::<StringArray>(batch, STATUS)?;
-            let reasons = optional::<StringArray>(batch, REASON)?;
-            let names = optional::<StringArray>(batch, DISPLAY_NAME)?;
-            let media_types = optional::<StringArray>(batch, MEDIA_TYPE)?;
-            let modified = optional::<Int64Array>(batch, MODIFIED)?;
-            let attributes = required::<StringArray>(batch, ATTRIBUTES)?;
-            let unread = required::<UInt32Array>(batch, UNREAD_PARTS)?;
-            for row in 0..batch.num_rows() {
-                let attributes: Attributes = serde_json::from_str(attributes.value(row))
-                    .map_err(|_cause| malformed("a file's attributes do not decode"))?;
-                let status = FileStatus::parse(statuses.value(row))?;
-                let reason = if reasons.is_null(row) {
-                    None
-                } else {
-                    let reason: FileReason = serde_json::from_str(reasons.value(row))
-                        .map_err(|_cause| malformed("a file's reason does not decode"))?;
-                    Some(reason)
-                };
-                if reason.map_or(status, FileReason::status) != status
-                    || (reason.is_none()
-                        && !matches!(status, FileStatus::Pending | FileStatus::Ready))
-                {
-                    return Err(malformed("a file's reason does not fit its status"));
-                }
-                let unread_parts = unread.value(row);
-                if unread_parts > 0 && status != FileStatus::Ready {
-                    return Err(malformed("a file that is not ready has unread parts"));
-                }
-                table.restore(FileEntry {
-                    ordinal: ordinals.value(row),
-                    key: keys.value(row).to_owned(),
-                    size: sizes.value(row),
-                    etag: ETag::new(etags.value(row))?,
-                    content_version: ManifestVersion::new(versions.value(row))?,
-                    status,
-                    reason,
-                    display_name: (!names.is_null(row)).then(|| names.value(row).to_owned()),
-                    media_type: if media_types.is_null(row) {
-                        None
-                    } else {
-                        Some(MediaType::new(media_types.value(row))?)
-                    },
-                    modified: (!modified.is_null(row))
-                        .then(|| Timestamp::from_millis(modified.value(row))),
-                    attributes,
-                    unread_parts,
-                })?;
+        for group in 0..index.groups.len() {
+            let (_, at) = index
+                .group(group)
+                .ok_or_else(|| malformed("a group is missing"))?;
+            let found = FileGroup::decode(slice(&bytes, at)?, &index, group)?;
+            for entry in found.entries {
+                table.restore(entry)?;
             }
         }
         Ok(table)
@@ -521,6 +486,388 @@ impl FileTable {
         self.files.insert(entry.key.clone(), entry);
         Ok(())
     }
+}
+
+/// What every search needs of a shard's file table, without the files themselves: each
+/// file's ordinal, content version and state, and where each group of files is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileIndex {
+    states: Vec<FileState>,
+    groups: Groups,
+    next_ordinal: u64,
+}
+
+/// A file's ordinal, content version and state, as a file table's index holds them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileState {
+    ordinal: u64,
+    key_hash: u64,
+    content_version: ManifestVersion,
+    status: FileStatus,
+    reason: Option<FileReason>,
+    unread_parts: u32,
+}
+
+impl FileState {
+    /// The file's ordinal in its table.
+    pub fn ordinal(&self) -> u64 {
+        self.ordinal
+    }
+
+    /// The version whose content the file's chunks come from.
+    pub fn content_version(&self) -> ManifestVersion {
+        self.content_version
+    }
+
+    /// The file's status.
+    pub fn status(&self) -> FileStatus {
+        self.status
+    }
+
+    /// Why the file is in its state, if a job recorded a reason.
+    pub fn reason(&self) -> Option<FileReason> {
+        self.reason
+    }
+
+    /// How many parts of a ready file had no text that could be read.
+    pub fn unread_parts(&self) -> u32 {
+        self.unread_parts
+    }
+}
+
+impl FileIndex {
+    /// The byte range of the index in a file table of `size` bytes, from its last
+    /// [`TRAILER_BYTES`](crate::TRAILER_BYTES) bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Malformed`](crate::Error::Malformed) if the trailer is not one.
+    pub fn locate(trailer: &[u8], size: u64) -> Result<std::ops::Range<u64>> {
+        grouped::locate(trailer, size, MAGIC)
+    }
+
+    /// Reads the index of a file table, the bytes [`FileIndex::locate`] gave.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedFormat`](crate::Error::UnsupportedFormat) for another
+    /// format, and an error for bytes that do not decode or an index that is inconsistent.
+    pub fn decode(bytes: Bytes) -> Result<Self> {
+        let stored = stored::read(bytes, FORMAT)?;
+        let next_ordinal = stored
+            .metadata
+            .get(NEXT_ORDINAL)
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| malformed("the next ordinal is missing"))?;
+        let mut found: Vec<FileState> = Vec::new();
+        for batch in &stored.batches {
+            let ordinals = required::<UInt64Array>(batch, ORDINAL)?;
+            let hashes = required::<UInt64Array>(batch, KEY_HASH)?;
+            let versions = required::<UInt64Array>(batch, CONTENT_VERSION)?;
+            let statuses = required::<StringArray>(batch, STATUS)?;
+            let reasons = optional::<StringArray>(batch, REASON)?;
+            let unread = required::<UInt32Array>(batch, UNREAD_PARTS)?;
+            for row in 0..batch.num_rows() {
+                let ordinal = ordinals.value(row);
+                if ordinal >= next_ordinal
+                    || found.last().is_some_and(|last| last.ordinal >= ordinal)
+                {
+                    return Err(malformed("a file table's ordinals are out of order"));
+                }
+                let status = FileStatus::parse(statuses.value(row))?;
+                let reason = reason_of(reasons, row)?;
+                let unread_parts = unread.value(row);
+                check_state(status, reason, unread_parts)?;
+                found.push(FileState {
+                    ordinal,
+                    key_hash: hashes.value(row),
+                    content_version: ManifestVersion::new(versions.value(row))?,
+                    status,
+                    reason,
+                    unread_parts,
+                });
+            }
+        }
+        let groups = Groups::of(&stored.metadata, found.len(), GROUP_ROWS)?;
+        Ok(FileIndex {
+            states: found,
+            groups,
+            next_ordinal,
+        })
+    }
+
+    /// Each file's state, by ordinal.
+    pub fn states(&self) -> &[FileState] {
+        &self.states
+    }
+
+    /// How many files the table holds.
+    pub fn len(&self) -> usize {
+        self.states.len()
+    }
+
+    /// Whether the table holds no files.
+    pub fn is_empty(&self) -> bool {
+        self.states.is_empty()
+    }
+
+    fn position(&self, ordinal: u64) -> Option<usize> {
+        self.states
+            .binary_search_by_key(&ordinal, |state| state.ordinal)
+            .ok()
+    }
+
+    /// The ordinals of the files whose key may be `key`: those whose key hashes as it does.
+    pub fn ordinals_for(&self, key: &str) -> impl Iterator<Item = u64> + '_ {
+        let hash = key_hash(key);
+        self.states
+            .iter()
+            .filter(move |state| state.key_hash == hash)
+            .map(|state| state.ordinal)
+    }
+
+    /// The content version of the file with this ordinal.
+    pub fn version(&self, ordinal: u64) -> Option<ManifestVersion> {
+        let state = self.states.get(self.position(ordinal)?)?;
+        Some(state.content_version)
+    }
+
+    /// The group holding the file with this ordinal.
+    pub fn group_of(&self, ordinal: u64) -> Option<usize> {
+        self.groups.of_row(self.position(ordinal)?, self.len())
+    }
+
+    /// The positions of group `group`'s files among the table's, and its byte range in the
+    /// file table.
+    pub fn group(&self, group: usize) -> Option<(std::ops::Range<usize>, std::ops::Range<u64>)> {
+        self.groups.get(group, self.len())
+    }
+
+    /// About how many bytes the index holds in memory.
+    pub fn heap_bytes(&self) -> usize {
+        self.states
+            .len()
+            .saturating_mul(size_of::<FileState>())
+            .saturating_add(self.groups.heap_bytes())
+            .saturating_add(size_of::<Self>())
+    }
+}
+
+/// The files of one group of a file table, by ordinal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileGroup {
+    entries: Vec<FileEntry>,
+}
+
+impl FileGroup {
+    /// Reads group `group` of the table `index` describes, from the bytes
+    /// [`FileIndex::group`] located.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedFormat`](crate::Error::UnsupportedFormat) for another
+    /// format, and an error for bytes that do not decode or that hold other files than the
+    /// index says.
+    pub fn decode(bytes: Bytes, index: &FileIndex, group: usize) -> Result<Self> {
+        let (rows, _) = index
+            .group(group)
+            .ok_or_else(|| malformed("a group is missing"))?;
+        let expected = index
+            .states
+            .get(rows)
+            .ok_or_else(|| malformed("a group is missing"))?;
+        let entries = decode_entries(bytes)?;
+        let matches = entries.len() == expected.len()
+            && entries.iter().zip(expected).all(|(entry, state)| {
+                entry.ordinal == state.ordinal
+                    && key_hash(&entry.key) == state.key_hash
+                    && entry.content_version == state.content_version
+                    && entry.status == state.status
+                    && entry.reason == state.reason
+                    && entry.unread_parts == state.unread_parts
+            });
+        if !matches {
+            return Err(malformed("a group holds other files than the index says"));
+        }
+        Ok(FileGroup { entries })
+    }
+
+    /// The file with this ordinal, if the group holds it.
+    pub fn by_ordinal(&self, ordinal: u64) -> Option<&FileEntry> {
+        let at = self
+            .entries
+            .binary_search_by_key(&ordinal, |entry| entry.ordinal)
+            .ok()?;
+        self.entries.get(at)
+    }
+
+    /// About how many bytes the group holds in memory.
+    pub fn heap_bytes(&self) -> usize {
+        self.entries
+            .iter()
+            .map(FileEntry::heap_bytes)
+            .sum::<usize>()
+            .saturating_add(size_of::<Self>())
+    }
+}
+
+/// A file key's 64-bit FNV-1a hash, which the index keeps to find a file by its key.
+fn key_hash(key: &str) -> u64 {
+    key.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+fn reason_of(reasons: &StringArray, row: usize) -> Result<Option<FileReason>> {
+    if reasons.is_null(row) {
+        return Ok(None);
+    }
+    let reason: FileReason = serde_json::from_str(reasons.value(row))
+        .map_err(|_cause| malformed("a file's reason does not decode"))?;
+    Ok(Some(reason))
+}
+
+fn check_state(status: FileStatus, reason: Option<FileReason>, unread_parts: u32) -> Result<()> {
+    if reason.map_or(status, FileReason::status) != status
+        || (reason.is_none() && !matches!(status, FileStatus::Pending | FileStatus::Ready))
+    {
+        return Err(malformed("a file's reason does not fit its status"));
+    }
+    if unread_parts > 0 && status != FileStatus::Ready {
+        return Err(malformed("a file that is not ready has unread parts"));
+    }
+    Ok(())
+}
+
+fn reasons_of(files: &[&FileEntry]) -> Result<Vec<Option<String>>> {
+    files
+        .iter()
+        .map(|file| file.reason.as_ref().map(serde_json::to_string).transpose())
+        .collect::<serde_json::Result<Vec<_>>>()
+        .map_err(|source| Error::Encoding(EncodingError::new(source)))
+}
+
+fn encode_index(files: &[&FileEntry], metadata: Vec<(&'static str, String)>) -> Result<Vec<u8>> {
+    let schema = Schema::new(vec![
+        Field::new(ORDINAL, DataType::UInt64, false),
+        Field::new(KEY_HASH, DataType::UInt64, false),
+        Field::new(CONTENT_VERSION, DataType::UInt64, false),
+        Field::new(STATUS, DataType::Utf8, false),
+        Field::new(REASON, DataType::Utf8, true),
+        Field::new(UNREAD_PARTS, DataType::UInt32, false),
+    ]);
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(UInt64Array::from_iter_values(
+            files.iter().map(|f| f.ordinal),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            files.iter().map(|f| key_hash(&f.key)),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            files.iter().map(|f| f.content_version.get()),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            files.iter().map(|f| f.status.as_str()),
+        )),
+        Arc::new(StringArray::from(reasons_of(files)?)),
+        Arc::new(UInt32Array::from_iter_values(
+            files.iter().map(|f| f.unread_parts),
+        )),
+    ];
+    stored::write(schema, columns, FORMAT, metadata)
+}
+
+fn encode_entries(files: &[&FileEntry]) -> Result<Vec<u8>> {
+    let attributes = files
+        .iter()
+        .map(|file| serde_json::to_string(&file.attributes))
+        .collect::<serde_json::Result<Vec<_>>>()
+        .map_err(|source| Error::Encoding(EncodingError::new(source)))?;
+    let display_names: Vec<Option<&str>> = files
+        .iter()
+        .map(|file| file.display_name.as_deref())
+        .collect();
+    let media_types: Vec<Option<&str>> = files
+        .iter()
+        .map(|file| file.media_type.as_ref().map(MediaType::as_str))
+        .collect();
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(UInt64Array::from_iter_values(
+            files.iter().map(|f| f.ordinal),
+        )),
+        Arc::new(StringArray::from_iter_values(files.iter().map(|f| &f.key))),
+        Arc::new(UInt64Array::from_iter_values(files.iter().map(|f| f.size))),
+        Arc::new(StringArray::from_iter_values(
+            files.iter().map(|f| f.etag.as_str()),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            files.iter().map(|f| f.content_version.get()),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            files.iter().map(|f| f.status.as_str()),
+        )),
+        Arc::new(StringArray::from(reasons_of(files)?)),
+        Arc::new(StringArray::from(display_names)),
+        Arc::new(StringArray::from(media_types)),
+        Arc::new(Int64Array::from(
+            files
+                .iter()
+                .map(|f| f.modified.map(Timestamp::millis))
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from_iter_values(attributes)),
+        Arc::new(UInt32Array::from_iter_values(
+            files.iter().map(|f| f.unread_parts),
+        )),
+    ];
+    stored::write(schema(), columns, FORMAT, vec![])
+}
+
+fn decode_entries(bytes: Bytes) -> Result<Vec<FileEntry>> {
+    let stored = stored::read(bytes, FORMAT)?;
+    let mut entries = Vec::new();
+    for batch in &stored.batches {
+        let ordinals = required::<UInt64Array>(batch, ORDINAL)?;
+        let keys = required::<StringArray>(batch, KEY)?;
+        let sizes = required::<UInt64Array>(batch, SIZE)?;
+        let etags = required::<StringArray>(batch, ETAG)?;
+        let versions = required::<UInt64Array>(batch, CONTENT_VERSION)?;
+        let statuses = required::<StringArray>(batch, STATUS)?;
+        let reasons = optional::<StringArray>(batch, REASON)?;
+        let names = optional::<StringArray>(batch, DISPLAY_NAME)?;
+        let media_types = optional::<StringArray>(batch, MEDIA_TYPE)?;
+        let modified = optional::<Int64Array>(batch, MODIFIED)?;
+        let attributes = required::<StringArray>(batch, ATTRIBUTES)?;
+        let unread = required::<UInt32Array>(batch, UNREAD_PARTS)?;
+        for row in 0..batch.num_rows() {
+            let attributes: Attributes = serde_json::from_str(attributes.value(row))
+                .map_err(|_cause| malformed("a file's attributes do not decode"))?;
+            let status = FileStatus::parse(statuses.value(row))?;
+            let reason = reason_of(reasons, row)?;
+            let unread_parts = unread.value(row);
+            check_state(status, reason, unread_parts)?;
+            entries.push(FileEntry {
+                ordinal: ordinals.value(row),
+                key: keys.value(row).to_owned(),
+                size: sizes.value(row),
+                etag: ETag::new(etags.value(row))?,
+                content_version: ManifestVersion::new(versions.value(row))?,
+                status,
+                reason,
+                display_name: (!names.is_null(row)).then(|| names.value(row).to_owned()),
+                media_type: if media_types.is_null(row) {
+                    None
+                } else {
+                    Some(MediaType::new(media_types.value(row))?)
+                },
+                modified: (!modified.is_null(row))
+                    .then(|| Timestamp::from_millis(modified.value(row))),
+                attributes,
+                unread_parts,
+            });
+        }
+    }
+    Ok(entries)
 }
 
 fn schema() -> Schema {
@@ -544,7 +891,7 @@ fn schema() -> Schema {
 mod tests {
     use proptest::prelude::*;
 
-    use cosmosearch_core::{AttributeValue, LimitKind, Number};
+    use cosmosearch_core::{LimitKind, Number};
 
     use super::*;
 
@@ -804,7 +1151,7 @@ mod tests {
     #[test]
     fn reports_a_newer_format() {
         let bytes = stored::write(schema(), empty_columns(), FORMAT + 1, vec![]).unwrap();
-        let err = FileTable::decode(Bytes::from(bytes)).unwrap_err();
+        let err = FileIndex::decode(Bytes::from(bytes)).unwrap_err();
         assert!(
             matches!(err, Error::UnsupportedFormat { format } if format == FORMAT + 1),
             "{err}"
@@ -878,10 +1225,59 @@ mod tests {
         columns[9] = Arc::new(Int64Array::from(vec![None::<i64>]));
         columns[10] = Arc::new(StringArray::from_iter_values(["{}"]));
         columns[11] = Arc::new(UInt32Array::from_iter_values([0]));
-        let metadata = vec![(NEXT_ORDINAL, "1".to_owned())];
-        let bytes = stored::write(schema(), columns, FORMAT, metadata).unwrap();
-        let err = FileTable::decode(Bytes::from(bytes)).unwrap_err();
+        let bytes = stored::write(schema(), columns, FORMAT, vec![]).unwrap();
+        let err = decode_entries(Bytes::from(bytes)).unwrap_err();
         assert!(matches!(err, Error::Core(_)), "{err}");
+    }
+
+    fn index_of(encoded: &Bytes) -> FileIndex {
+        FileIndex::decode(grouped::index_of(encoded, MAGIC).unwrap()).unwrap()
+    }
+
+    fn many(count: usize) -> FileTable {
+        let mut table = FileTable::new();
+        for at in 0..count {
+            table.insert(entry(&format!("docs/{at:05}.txt")));
+        }
+        for gone in (0..count).step_by(7) {
+            table.remove(&format!("docs/{gone:05}.txt"));
+        }
+        table
+    }
+
+    #[test]
+    fn a_table_of_several_groups_round_trips_and_each_group_reads_alone() {
+        let table = many(1300);
+        let encoded = Bytes::from(table.encode().unwrap());
+        assert_eq!(FileTable::decode(encoded.clone()).unwrap(), table);
+        let index = index_of(&encoded);
+        assert_eq!(index.len(), table.len());
+        assert_eq!(index.version(7), None, "a removed file is not in the index");
+        for ordinal in [1, 600, 1299] {
+            let expected = table.by_ordinal(ordinal).unwrap();
+            assert_eq!(index.version(ordinal), Some(expected.content_version()));
+            let group = index.group_of(ordinal).unwrap();
+            let (_, at) = index.group(group).unwrap();
+            let found = FileGroup::decode(slice(&encoded, at).unwrap(), &index, group).unwrap();
+            assert_eq!(found.by_ordinal(ordinal), Some(expected));
+        }
+        let (_, first) = index.group(0).unwrap();
+        FileGroup::decode(slice(&encoded, first).unwrap(), &index, 1).unwrap_err();
+    }
+
+    #[test]
+    fn the_index_holds_what_counting_files_needs() {
+        let mut table = many(20);
+        table.mark_ready("docs/00001.txt", 2);
+        let index = index_of(&Bytes::from(table.encode().unwrap()));
+        let found: Vec<u64> = index.ordinals_for("docs/00005.txt").collect();
+        assert_eq!(found, [5]);
+        assert_eq!(index.ordinals_for("docs/00007.txt").count(), 0);
+        let state = index.states().first().unwrap();
+        assert_eq!(state.ordinal(), 1);
+        assert_eq!(state.status(), FileStatus::Ready);
+        assert_eq!(state.unread_parts(), 2);
+        assert_eq!(state.reason(), None);
     }
 
     proptest! {
