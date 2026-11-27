@@ -671,7 +671,7 @@ checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
 
 [[package]]
 name = "cosmosearch"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -702,7 +702,7 @@ dependencies = [
 
 [[package]]
 name = "cosmosearch-cache"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -717,7 +717,7 @@ dependencies = [
 
 [[package]]
 name = "cosmosearch-chunk"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cosmosearch-core",
  "proptest",
@@ -726,7 +726,7 @@ dependencies = [
 
 [[package]]
 name = "cosmosearch-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -739,7 +739,7 @@ dependencies = [
 
 [[package]]
 name = "cosmosearch-embed-local"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -751,7 +751,7 @@ dependencies = [
 
 [[package]]
 name = "cosmosearch-extract-csv"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cosmosearch-core",
  "csv",
@@ -759,7 +759,7 @@ dependencies = [
 
 [[package]]
 name = "cosmosearch-extract-docx"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cosmosearch-core",
  "flate2",
@@ -769,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "cosmosearch-extract-html"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cosmosearch-core",
  "html5gum",
@@ -778,7 +778,7 @@ dependencies = [
 
 [[package]]
 name = "cosmosearch-extract-json"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cosmosearch-core",
  "serde",
@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "cosmosearch-extract-pdf"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cosmosearch-core",
  "flate2",
@@ -797,7 +797,7 @@ dependencies = [
 
 [[package]]
 name = "cosmosearch-format"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -812,7 +812,7 @@ dependencies = [
 
 [[package]]
 name = "cosmosearch-heat"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "cosmosearch-core",
@@ -827,7 +827,7 @@ dependencies = [
 
 [[package]]
 name = "cosmosearch-http"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cosmosearch-core",
  "reqwest",
@@ -839,7 +839,7 @@ dependencies = [
 
 [[package]]
 name = "cosmosearch-indexer"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -858,7 +858,7 @@ dependencies = [
 
 [[package]]
 name = "cosmosearch-lexical"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "cosmosearch-core",
@@ -872,7 +872,7 @@ dependencies = [
 
 [[package]]
 name = "cosmosearch-query"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "cosmosearch-rerank-local"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "cosmosearch-store"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -922,7 +922,7 @@ dependencies = [
 
 [[package]]
 name = "cosmosearch-vector"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "bytes",

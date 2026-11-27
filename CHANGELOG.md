@@ -6,12 +6,13 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-27
+
 ### Added
 
 - `Index::word_matches`: an index plug-in can say where a passage holds a word of the query,
   read the way it reads words. It returns `None` unless a plug-in implements it, and BM25
   does.
-
 - `TableCache`, set with `EngineBuilder::table_cache` or `ReaderOptions::tables`: decoded
   file tables and groups of files and chunk records under a byte budget that engines can
   share, 64 MiB per engine unless set (`DEFAULT_TABLE_BUDGET`).
@@ -133,6 +134,7 @@ The first release.
 
 Requires Rust 1.99 or later.
 
-[Unreleased]: https://github.com/cosmobuild/cosmosearch/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/cosmobuild/cosmosearch/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/cosmobuild/cosmosearch/releases/tag/v0.3.0
 [0.2.0]: https://github.com/cosmobuild/cosmosearch/releases/tag/v0.2.0
 [0.1.0]: https://github.com/cosmobuild/cosmosearch/releases/tag/v0.1.0
