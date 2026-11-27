@@ -43,6 +43,14 @@ pub struct SearchHit {
     heading_path: Vec<String>,
     display_name: Option<String>,
     snippet: Option<Snippet>,
+    chunk: Option<ChunkAt>,
+}
+
+/// The segment and row of the chunk a hit was found at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChunkAt {
+    pub(crate) segment: SegmentId,
+    pub(crate) row: usize,
 }
 
 impl SearchHit {
@@ -110,6 +118,11 @@ impl SearchHit {
         self.snippet.as_ref()
     }
 
+    /// The chunk the hit was found at, if the search knows it.
+    pub(crate) fn chunk(&self) -> Option<&ChunkAt> {
+        self.chunk.as_ref()
+    }
+
     pub(crate) fn set_snippet(&mut self, snippet: Snippet) {
         self.snippet = Some(snippet);
     }
@@ -135,6 +148,7 @@ impl fmt::Debug for SearchHit {
                 &self.display_name.as_ref().map(String::len),
             )
             .field("snippet", &self.snippet)
+            .field("chunk", &self.chunk)
             .finish()
     }
 }
@@ -613,6 +627,10 @@ fn passages(
             heading_path: record.heading_path().to_vec(),
             display_name: place.file.display_name().map(str::to_owned),
             snippet: None,
+            chunk: Some(ChunkAt {
+                segment: candidate.segment.clone(),
+                row: candidate.row,
+            }),
         };
         resolved.in_lists.place(&key, &mut passage);
         found.push(passage);

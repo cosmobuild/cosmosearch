@@ -17,6 +17,13 @@ All notable changes are listed here. The format follows
   share, 64 MiB per engine unless set (`DEFAULT_TABLE_BUDGET`).
 - `Engine::resident_bytes` and `Reader::resident_bytes`: about how many bytes of decoded
   tables an engine holds.
+- Stored text: `IndexOptions::stored_text`, set when an index is created with
+  `MetadataStore::create_with`, keeps the text of each chunk that can't be read by a byte
+  range (PDF pages, Word paragraphs, CSV rows, JSON values) with its segment, in
+  `text-<id>.bin`. `read`, `expand`, `chunks`, snippets and reranking read it instead of
+  parsing the file where a chunk has stored text. Reads still refuse a changed or deleted
+  file as stale. Snippets and reranking use each hit's own chunk, not its whole page, and
+  read it outside the `snippets` file limit.
 
 ### Changed
 

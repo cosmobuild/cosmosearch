@@ -144,7 +144,8 @@ impl ReaderOptions {
     /// Gives each hit a snippet: its passage, read back from its file, with the query's words
     /// marked. One search reads at most `max_files` files for snippets, those of its best
     /// hits first, and the hits of other files have none; zero, the default, gives no
-    /// snippets and reads nothing.
+    /// snippets and reads nothing. In an index with stored text, a hit whose chunk has text
+    /// takes it from the index instead, without counting toward `max_files`.
     #[must_use]
     pub fn snippets(mut self, max_files: usize) -> Self {
         self.snippet_files = max_files;
@@ -689,7 +690,8 @@ impl Reader {
         let mut loader = Loader::new(&self.index, &self.tables, cache);
         let mut refreshed = false;
         loop {
-            match read::run(self.sources(&loader), &manifest, target, access).await {
+            let sources = self.sources(&loader);
+            match read::run(sources, &manifest, target, access).await {
                 Ok(chunks) => {
                     if let Some((shard, _)) = manifest.shard_for(target.key()) {
                         self.record(Signal::Read, &[shard]);
@@ -751,11 +753,8 @@ impl Reader {
         if self.options.snippet_files == 0 {
             return;
         }
-        let references: Vec<SourceRef> = hits.iter().map(|hit| hit.source().clone()).collect();
-        let references: Vec<&SourceRef> = references.iter().collect();
-        let texts = passages
-            .texts(&references, self.options.snippet_files)
-            .await;
+        let views: Vec<&SearchHit> = hits.iter().collect();
+        let texts = passages.texts(&views, self.options.snippet_files).await;
         for (hit, text) in hits.iter_mut().zip(texts) {
             if let Some(text) = text {
                 let marked = snippet::matches(self.plugins.indexes(), query, &text);

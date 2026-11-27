@@ -195,9 +195,23 @@ flowchart LR
 4. **Publish** commits the segment.
 
 Extraction runs per file, so you can isolate it in its own process and a file that crashes
-the process takes down only itself. Its output goes back to you as a plain value; the
-library stores no extracted text anywhere. `index::index_pending` runs all four steps in one
-process for the common case.
+the process takes down only itself. Its output goes back to you as a plain value. By
+default the library stores no extracted text anywhere. `index::index_pending` runs all four
+steps in one process for the common case.
+
+**Stored text.** An index created with `IndexOptions::new().stored_text(true)` (through
+`MetadataStore::create_with`) also keeps, with each segment, the text of every chunk that
+can't be read back by a byte range: PDF pages, Word paragraphs, CSV rows and JSON values.
+The build writes it from the extraction it already ran, in `text-<id>.bin`, in compressed
+groups of 64 chunks, and it goes when its segment goes. Keyword and vector segments each
+store their own copy, so an index with vectors keeps the text twice. `read`, `expand`,
+`chunks`, snippets and reranking then read that text by range instead of reading and
+parsing the file, and a snippet or reranked passage is the hit's own chunk rather than its
+whole page. Where a chunk has no stored text, such as in a segment built without it, or
+reading it fails, they read and extract the file as before. A read still checks with one
+request that the file is the version indexed, and refuses a changed or deleted file as
+stale. Stored text is document text at rest in the metadata location, so protect that
+location as you protect the files.
 
 Jobs are safe to repeat and safe to run late. A job's result for a file is applied only if
 the file is still pending at the version the job planned for. If the file changed or was
@@ -213,7 +227,8 @@ can quote document text; [SECURITY.md](../SECURITY.md) says how to keep it out o
 logs. Code in the same process can't survive running out of memory, so if you index files
 you don't trust, run the extract step in a separate process with memory and time limits.
 The engine extracts files again to read passages back (for `read`, `expand`, `chunks`,
-snippets and reranking), so the same applies to the process that serves searches.
+snippets and reranking), unless the index stores their text, so the same applies to the
+process that serves searches.
 
 **Chunks** follow the structure of each format: headings and paragraphs for text, Markdown
 and HTML, pages for PDF, document elements for docx, records for CSV and values for JSON.

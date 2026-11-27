@@ -3,7 +3,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use cosmosearch_core::{IndexId, SegmentId};
-use cosmosearch_format::{ChunkGroup, FileGroup, FileTable};
+use cosmosearch_format::{ChunkGroup, FileGroup, FileTable, TextGroup};
 
 /// The budget of a reader's table cache unless its options give one.
 pub const DEFAULT_TABLE_BUDGET: u64 = 64 * 1024 * 1024;
@@ -81,6 +81,7 @@ pub(crate) enum Part {
     Files,
     FileGroup(usize),
     Group(usize),
+    TextGroup(usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -95,6 +96,7 @@ pub(crate) enum Table {
     Files(Arc<FileTable>),
     FileGroup(Arc<FileGroup>),
     Group(Arc<ChunkGroup>),
+    TextGroup(Arc<TextGroup>),
 }
 
 impl Table {
@@ -103,6 +105,7 @@ impl Table {
             Table::Files(files) => files.heap_bytes(),
             Table::FileGroup(group) => group.heap_bytes(),
             Table::Group(group) => group.heap_bytes(),
+            Table::TextGroup(group) => group.heap_bytes(),
         };
         u64::try_from(bytes).unwrap_or(u64::MAX)
     }

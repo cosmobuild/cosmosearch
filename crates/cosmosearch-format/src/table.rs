@@ -434,6 +434,7 @@ impl FileTable {
             .collect::<Result<Vec<_>>>()?;
         grouped::assemble(
             &groups,
+            GROUP_ROWS,
             |mut metadata| {
                 metadata.push((NEXT_ORDINAL, self.next_ordinal.to_string()));
                 encode_index(&files, metadata)
@@ -587,7 +588,7 @@ impl FileIndex {
                 });
             }
         }
-        let groups = Groups::of(&stored.metadata, found.len())?;
+        let groups = Groups::of(&stored.metadata, found.len(), GROUP_ROWS)?;
         Ok(FileIndex {
             states: found,
             groups,

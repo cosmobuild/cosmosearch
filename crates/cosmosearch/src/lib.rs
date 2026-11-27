@@ -48,8 +48,8 @@ mod engine;
 mod indexing;
 
 pub use cosmosearch_core::{
-    Budget, ETag, FileSource, Filter, IndexId, Location, Locator, ManifestVersion, Query, Scope,
-    ShardId, SourceRef, Status,
+    Budget, ETag, FileSource, Filter, IndexId, IndexOptions, Location, Locator, ManifestVersion,
+    Query, Scope, ShardId, SourceRef, Status,
 };
 pub use cosmosearch_format::{FileEntry, FileReason, FileStatus};
 pub use cosmosearch_query::{

@@ -4,10 +4,12 @@ use bytes::Bytes;
 use cosmosearch_chunk::{Extractors, extract_chunks};
 use cosmosearch_core::{
     BuiltBy, ByteRange, Chunk, ETag, ExtractFailure, ExtractLimits, ExtractorProfile, IndexId,
-    IndexKind, Level, LimitKind, Location, Manifest, ManifestVersion, MediaType, ModelId,
+    IndexKind, Level, LimitKind, Location, Locator, Manifest, ManifestVersion, MediaType, ModelId,
     SegmentEntry, SegmentFile, SegmentFileName, SegmentId, ShardId, SharedIndex, Usage,
 };
-use cosmosearch_format::{ChunkRecord, ChunkTable, FileEntry, FileReason, FileStatus, FileTable};
+use cosmosearch_format::{
+    ChunkRecord, ChunkTable, FileEntry, FileReason, FileStatus, FileTable, TextTable,
+};
 use cosmosearch_store::{CommitOutcome, ObjectKey, new_commit_id};
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +18,7 @@ use crate::promotion::{Guard, appeared};
 use crate::{Applied, Error, Indexer, Result};
 
 const CHUNKS_PREFIX: &str = "chunks-";
+const TEXT_PREFIX: &str = "text-";
 
 fn named_first(chunks: Vec<Chunk>, mut name: Option<String>) -> Vec<Chunk> {
     chunks
@@ -726,6 +729,7 @@ impl Indexer {
         let mut files = built.into_files();
         let name = SegmentFileName::new(format!("{CHUNKS_PREFIX}{id}.bin"))?;
         files.push(cosmosearch_core::BuiltFile::new(name, table.encode()?));
+        files.extend(self.text_file(&id, &chunks).await?);
         let mut stored = Vec::with_capacity(files.len());
         for file in files {
             let name = file.name().clone();
@@ -752,6 +756,35 @@ impl Indexer {
             drops: false,
             usage,
         }))
+    }
+
+    /// The file holding the text of each of `chunks` that is not read back by a byte range,
+    /// if the index stores text and any chunk needs it.
+    async fn text_file(
+        &self,
+        id: &SegmentId,
+        chunks: &[Chunk],
+    ) -> Result<Option<cosmosearch_core::BuiltFile>> {
+        if !self.head().await?.options().has_stored_text() {
+            return Ok(None);
+        }
+        let texts = TextTable::new(
+            chunks
+                .iter()
+                .map(|chunk| {
+                    let by_range = matches!(chunk.source().locator(), Locator::Bytes(_));
+                    (!by_range).then(|| chunk.text().to_owned())
+                })
+                .collect(),
+        );
+        if !texts.holds_text() {
+            return Ok(None);
+        }
+        let name = SegmentFileName::new(format!("{TEXT_PREFIX}{id}.bin"))?;
+        Ok(Some(cosmosearch_core::BuiltFile::new(
+            name,
+            texts.encode()?,
+        )))
     }
 
     /// Makes a built segment part of the index, if it still applies. Safe to repeat.

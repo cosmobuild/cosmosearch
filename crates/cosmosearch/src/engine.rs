@@ -321,7 +321,8 @@ impl EngineBuilder {
     }
 
     /// Gives each hit a snippet, its passage with the query's words marked, reading at most
-    /// `max_files` files for them in one search; zero, the default, gives none.
+    /// `max_files` files for them in one search; zero, the default, gives none. A hit whose
+    /// chunk has stored text takes it from the index instead, outside that count.
     #[must_use]
     pub fn snippets(mut self, max_files: usize) -> Self {
         self.options = self.options.snippets(max_files);

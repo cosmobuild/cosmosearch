@@ -330,11 +330,6 @@ impl ChunkTable {
         self.records.is_empty()
     }
 
-    /// The rows around `row` in the same file, up to `before` and `after` further chunks.
-    pub fn neighbours(&self, row: usize, before: usize, after: usize) -> Range<usize> {
-        self.spans.neighbours(row, before, after)
-    }
-
     /// The rows of the chunks of the file with this ordinal at this content version, empty if
     /// the segment holds none.
     pub fn file_rows(&self, file_ordinal: u64, content_version: ManifestVersion) -> Range<usize> {
@@ -345,32 +340,6 @@ impl ChunkTable {
     /// from, in row order.
     pub fn file_versions(&self) -> Vec<(u64, ManifestVersion)> {
         self.spans.file_versions()
-    }
-
-    /// The rows whose chunks are live in `files` and whose file is in `scope` and passes
-    /// `filter`.
-    pub fn rows(&self, files: &FileTable, scope: &Scope, filter: &Filter) -> RowSet {
-        self.spans.filtered(files, scope, filter)
-    }
-
-    /// The ref of the chunk in `row`, or `None` if the chunk is not live in `files`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the location or the ref cannot be formed.
-    pub fn source_ref(
-        &self,
-        row: usize,
-        files: &FileTable,
-        data: &Location,
-    ) -> Result<Option<SourceRef>> {
-        let Some(record) = self.get(row) else {
-            return Ok(None);
-        };
-        match files.by_ordinal(record.file_ordinal) {
-            Some(file) => record.source_ref(file, data),
-            None => Ok(None),
-        }
     }
 
     /// The bytes stored for this table: its records in Parquet groups of up to 512 rows, then
@@ -388,6 +357,7 @@ impl ChunkTable {
             .collect::<Result<Vec<_>>>()?;
         grouped::assemble(
             &groups,
+            GROUP_ROWS,
             |metadata| encode_index(&self.spans, metadata),
             MAGIC,
         )
@@ -471,7 +441,7 @@ impl ChunkIndex {
             }
         }
         let spans = Spans::new(spans, profiles)?;
-        let groups = Groups::of(&stored.metadata, spans.rows())?;
+        let groups = Groups::of(&stored.metadata, spans.rows(), GROUP_ROWS)?;
         Ok(ChunkIndex { spans, groups })
     }
 
@@ -765,6 +735,17 @@ mod tests {
         "s3://example-bucket/docs/".parse().unwrap()
     }
 
+    fn indexed(table: &ChunkTable) -> ChunkIndex {
+        index_of(&Bytes::from(table.encode().unwrap()))
+    }
+
+    fn source_ref(chunks: &ChunkTable, row: usize) -> Option<SourceRef> {
+        let record = chunks.get(row)?;
+        let files = files();
+        let file = files.by_ordinal(record.file_ordinal)?;
+        record.source_ref(file, &data()).unwrap()
+    }
+
     #[test]
     fn a_table_round_trips() {
         let original = sample();
@@ -786,10 +767,7 @@ mod tests {
             (4, "s3://example-bucket/docs/b.pdf#page=5@etag=9f3a"),
         ];
         for (row, expected) in cases {
-            let found = sample()
-                .source_ref(row, &files(), &data())
-                .unwrap()
-                .unwrap();
+            let found = source_ref(&sample(), row).unwrap();
             assert_eq!(found.to_string(), expected);
         }
     }
@@ -797,9 +775,9 @@ mod tests {
     #[test]
     fn a_chunk_of_an_older_version_or_a_removed_file_is_not_live() {
         let chunks = table(vec![record(0, 1, bytes(0)), record(9, 2, bytes(0))]);
-        assert_eq!(chunks.source_ref(0, &files(), &data()).unwrap(), None);
-        assert_eq!(chunks.source_ref(1, &files(), &data()).unwrap(), None);
-        assert_eq!(chunks.source_ref(99, &files(), &data()).unwrap(), None);
+        assert_eq!(source_ref(&chunks, 0), None);
+        assert_eq!(source_ref(&chunks, 1), None);
+        assert_eq!(source_ref(&chunks, 99), None);
     }
 
     #[test]
@@ -820,12 +798,12 @@ mod tests {
                 AttributeValue::One("legal".to_owned()),
             )]));
         files.insert(labelled);
-        let chunks = table(vec![
+        let chunks = indexed(&table(vec![
             record(0, 2, bytes(0)),
             record(0, 2, bytes(10)),
             record(1, 3, bytes(0)),
             record(7, 3, bytes(0)),
-        ]);
+        ]));
         let members = |filter: &Filter| -> Vec<u64> {
             let rows = chunks.rows(&files, &Scope::all(), filter);
             (0..5).filter(|row| rows.contains(*row)).collect()
@@ -837,7 +815,7 @@ mod tests {
             Vec::<u64>::new()
         );
 
-        let older = table(vec![record(0, 1, bytes(0))]);
+        let older = indexed(&table(vec![record(0, 1, bytes(0))]));
         assert!(older.rows(&files, &Scope::all(), &Filter::new()).is_empty());
         let scoped = |scope: &Scope| -> Vec<u64> {
             let rows = chunks.rows(&files, scope, &Filter::new());
@@ -858,7 +836,7 @@ mod tests {
 
     #[test]
     fn neighbours_stay_inside_the_file() {
-        let chunks = sample();
+        let chunks = indexed(&sample());
         let cases = [
             ((1, 1, 1), 0..3),
             ((0, 5, 0), 0..1),
@@ -1007,6 +985,7 @@ mod tests {
                 .filter(|at| kept[*at])
                 .collect();
             let (chunks, table) = generated(&files, &order);
+            let index = indexed(&chunks);
             for filter in [
                 Filter::new(),
                 Filter::new().equals("label", "legal"),
@@ -1014,7 +993,7 @@ mod tests {
             ] {
                 for scope in [Scope::all(), Scope::prefix("docs/00"), Scope::prefixes(&["docs/001", "docs/01"])] {
                     prop_assert_eq!(
-                        chunks.rows(&table, &scope, &filter),
+                        index.rows(&table, &scope, &filter),
                         walked_rows(&chunks, &table, &scope, &filter)
                     );
                 }
@@ -1031,10 +1010,10 @@ mod tests {
                     prop_assert_eq!(found, walked);
                 }
             }
-            prop_assert!(chunks.neighbours(chunks.len(), 1, 1).is_empty());
+            prop_assert!(index.neighbours(chunks.len(), 1, 1).is_empty());
             for row in 0..chunks.len() {
                 for (before, after) in [(0, 0), (1, 2), (9, 9)] {
-                    let found = chunks.neighbours(row, before, after);
+                    let found = index.neighbours(row, before, after);
                     prop_assert!(found.contains(&row));
                     for at in found.clone() {
                         prop_assert_eq!(
@@ -1082,7 +1061,7 @@ mod tests {
             index.file_rows(3, version(2)),
             original.file_rows(3, version(2))
         );
-        assert_eq!(index.neighbours(899, 5, 5), original.neighbours(899, 5, 5));
+        assert_eq!(index.neighbours(899, 5, 5), 894..900);
         let place = index.place(905).unwrap();
         assert_eq!((place.file_ordinal, place.position), (3, 5));
         assert_eq!(place.profile, original.get(905).unwrap().profile());
@@ -1110,7 +1089,7 @@ mod tests {
         let file_index =
             FileIndex::decode(grouped::index_of(&encoded, *b"CSFILETB").unwrap()).unwrap();
         let live = index.live_rows(&file_index);
-        assert_eq!(live, table.rows(&files, &Scope::all(), &Filter::new()));
+        assert_eq!(live, index.rows(&files, &Scope::all(), &Filter::new()));
         assert!(live.covers(0..3) && !live.contains(3));
     }
 
@@ -1167,6 +1146,7 @@ mod tests {
         .unwrap();
         let bytes = grouped::assemble(
             &[vec![0; 10]],
+            GROUP_ROWS,
             |metadata| encode_index(&huge, metadata),
             MAGIC,
         )

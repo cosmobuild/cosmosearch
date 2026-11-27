@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use cosmosearch_core::{
-    CommitId, FileSource, IndexId, IndexRecord, Location, Manifest, ManifestObject, ManifestVersion,
+    CommitId, FileSource, IndexId, IndexOptions, IndexRecord, Location, Manifest, ManifestObject,
+    ManifestVersion,
 };
 use futures_util::TryStreamExt;
 
@@ -123,11 +124,26 @@ impl MetadataStore {
     /// [`Error::CreateOnlyIgnored`] for a store that accepts a second create-only write of
     /// the same key, and an error if the store refuses a write.
     pub async fn create(&self, data: &Location, source: FileSource) -> Result<CreateOutcome> {
+        self.create_with(data, source, IndexOptions::new()).await
+    }
+
+    /// Creates an index for the files at `data` built with `options`, which every later
+    /// version keeps.
+    ///
+    /// # Errors
+    ///
+    /// As for [`MetadataStore::create`].
+    pub async fn create_with(
+        &self,
+        data: &Location,
+        source: FileSource,
+        options: IndexOptions,
+    ) -> Result<CreateOutcome> {
         self.refuse_data_inside(data)?;
         if !self.is_empty().await? {
             return Ok(CreateOutcome::Conflict);
         }
-        self.write_new_index(IndexId::new(random_id())?, data, source)
+        self.write_new_index(IndexId::new(random_id())?, data, source, options)
             .await
     }
 
@@ -142,13 +158,31 @@ impl MetadataStore {
         data: &Location,
         source: FileSource,
     ) -> Result<CreateOutcome> {
+        self.retry_create_with(id, data, source, IndexOptions::new())
+            .await
+    }
+
+    /// Finishes a [`MetadataStore::create_with`] that ended [`CreateOutcome::Unknown`], with
+    /// the same id and options.
+    ///
+    /// # Errors
+    ///
+    /// As for [`MetadataStore::create`].
+    pub async fn retry_create_with(
+        &self,
+        id: &IndexId,
+        data: &Location,
+        source: FileSource,
+        options: IndexOptions,
+    ) -> Result<CreateOutcome> {
         self.refuse_data_inside(data)?;
         match self.read_index_record().await? {
             Some(record) if record.index_id() == id => Ok(CreateOutcome::Created(
                 IndexHandle::new(self.clone(), id.clone()),
             )),
             None if self.holds_only(id).await? => {
-                self.write_new_index(id.clone(), data, source).await
+                self.write_new_index(id.clone(), data, source, options)
+                    .await
             }
             Some(_) | None => Ok(CreateOutcome::Conflict),
         }
@@ -159,10 +193,11 @@ impl MetadataStore {
         id: IndexId,
         data: &Location,
         source: FileSource,
+        options: IndexOptions,
     ) -> Result<CreateOutcome> {
         let handle = IndexHandle::new(self.clone(), id.clone());
         let commit_id = retry_stable_commit_id(&id)?;
-        let manifest = Manifest::first(id.clone(), commit_id, data.clone(), source)?;
+        let manifest = Manifest::first_with(id.clone(), commit_id, data.clone(), source, options)?;
         let key = handle.manifest_key(ManifestVersion::FIRST)?;
         let body = Bytes::from(manifest.encode()?);
         match self.place_first_manifest(&key, body, &id).await? {

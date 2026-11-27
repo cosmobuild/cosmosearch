@@ -236,6 +236,8 @@ pub struct Manifest {
     commit_id: CommitId,
     data_location: Location,
     file_source: FileSource,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    stored_text: bool,
     shards: BTreeMap<ShardId, ShardEntry>,
     model_ids: BTreeSet<ModelId>,
 }
@@ -248,8 +250,38 @@ struct ManifestFields {
     commit_id: CommitId,
     data_location: Location,
     file_source: FileSource,
+    #[serde(default)]
+    stored_text: bool,
     shards: BTreeMap<ShardId, ShardEntry>,
     model_ids: BTreeSet<ModelId>,
+}
+
+/// How an index is built, chosen when it is created and kept by every version after.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IndexOptions {
+    stored_text: bool,
+}
+
+impl IndexOptions {
+    /// The options of an index created without any: no stored text.
+    pub fn new() -> Self {
+        IndexOptions::default()
+    }
+
+    /// Stores the text of each chunk that cannot be read back by a byte range, such as a PDF
+    /// page or a docx paragraph, with its segment, so reading it needs no parse of its file.
+    /// The index then holds document text at rest.
+    #[must_use]
+    pub fn stored_text(mut self, stored: bool) -> Self {
+        self.stored_text = stored;
+        self
+    }
+
+    /// Whether the index stores the text of chunks that cannot be read by a byte range.
+    pub fn has_stored_text(&self) -> bool {
+        self.stored_text
+    }
 }
 
 impl TryFrom<ManifestFields> for Manifest {
@@ -263,6 +295,7 @@ impl TryFrom<ManifestFields> for Manifest {
             commit_id: fields.commit_id,
             data_location: fields.data_location,
             file_source: fields.file_source,
+            stored_text: fields.stored_text,
             shards: fields.shards,
             model_ids: fields.model_ids,
         };
@@ -283,6 +316,27 @@ impl Manifest {
         data_location: Location,
         file_source: FileSource,
     ) -> Result<Self> {
+        Manifest::first_with(
+            index_id,
+            commit_id,
+            data_location,
+            file_source,
+            IndexOptions::new(),
+        )
+    }
+
+    /// The first manifest of a new index built with `options`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the fixed first shard id is not valid, which is a bug.
+    pub fn first_with(
+        index_id: IndexId,
+        commit_id: CommitId,
+        data_location: Location,
+        file_source: FileSource,
+        options: IndexOptions,
+    ) -> Result<Self> {
         let shard = ShardEntry::new(KeyRange::all(), Vec::new());
         Ok(Manifest {
             format: FORMAT,
@@ -291,6 +345,7 @@ impl Manifest {
             commit_id,
             data_location,
             file_source,
+            stored_text: options.stored_text,
             shards: BTreeMap::from([(ShardId::new("0")?, shard)]),
             model_ids: BTreeSet::new(),
         })
@@ -315,6 +370,7 @@ impl Manifest {
             commit_id,
             data_location: self.data_location.clone(),
             file_source: self.file_source,
+            stored_text: self.stored_text,
             shards,
             model_ids,
         };
@@ -398,6 +454,13 @@ impl Manifest {
     /// How files reach this index.
     pub fn file_source(&self) -> FileSource {
         self.file_source
+    }
+
+    /// The options the index was created with.
+    pub fn options(&self) -> IndexOptions {
+        IndexOptions {
+            stored_text: self.stored_text,
+        }
     }
 
     /// The shards, by id.
@@ -675,6 +738,34 @@ mod tests {
         assert_eq!(next.index_id(), parent.index_id());
         assert_eq!(next.data_location(), parent.data_location());
         assert_eq!(next.shard_for("n").unwrap().0.as_str(), "b");
+    }
+
+    #[test]
+    fn stored_text_is_kept_by_successors_and_absent_from_older_manifests() {
+        let manifest = Manifest::first_with(
+            IndexId::new("idx").unwrap(),
+            CommitId::new("c1").unwrap(),
+            "s3://example-bucket/docs/".parse().unwrap(),
+            FileSource::Listing,
+            IndexOptions::new().stored_text(true),
+        )
+        .unwrap();
+        let encoded = String::from_utf8(manifest.encode().unwrap()).unwrap();
+        assert!(encoded.contains(r#""stored_text":true"#), "{encoded}");
+        let next = manifest
+            .successor(
+                CommitId::new("c2").unwrap(),
+                manifest.shards().clone(),
+                BTreeSet::new(),
+            )
+            .unwrap();
+        assert!(next.options().has_stored_text());
+        let older = r#"{"kind":"manifest","format":1,"version":1,"index_id":"idx","commit_id":"c1","data_location":"s3://example-bucket/docs/","file_source":"listing","shards":{"0":{"range":{"start":"","end":null},"segments":[]}},"model_ids":[]}"#;
+        let ManifestObject::Manifest(decoded) = ManifestObject::decode(older.as_bytes()).unwrap()
+        else {
+            panic!("a manifest");
+        };
+        assert!(!decoded.options().has_stored_text());
     }
 
     #[test]

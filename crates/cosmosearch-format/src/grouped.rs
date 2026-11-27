@@ -14,17 +14,18 @@ pub(crate) const GROUP_ROWS: usize = 512;
 const GROUP_ROWS_KEY: &str = "cosmosearch.group_rows";
 const GROUP_BYTES_KEY: &str = "cosmosearch.group_bytes";
 
-/// The bytes of a table kept as `groups` of rows, then the index `index` makes from the
+/// The bytes of a table kept as `groups` of `size` rows, then the index `index` makes from the
 /// metadata it is given, then a trailer of [`TRAILER_BYTES`] with the index's length and
 /// `magic`.
 pub(crate) fn assemble(
     groups: &[Vec<u8>],
+    size: usize,
     index: impl FnOnce(Vec<(&'static str, String)>) -> Result<Vec<u8>>,
     magic: [u8; 8],
 ) -> Result<Vec<u8>> {
     let lengths: Vec<String> = groups.iter().map(|group| group.len().to_string()).collect();
     let metadata = vec![
-        (GROUP_ROWS_KEY, GROUP_ROWS.to_string()),
+        (GROUP_ROWS_KEY, size.to_string()),
         (GROUP_BYTES_KEY, lengths.join(",")),
     ];
     let mut bytes = groups.concat();
@@ -68,12 +69,16 @@ pub(crate) struct Groups {
 }
 
 impl Groups {
-    /// The groups an index's metadata names, which must hold `rows` rows.
-    pub(crate) fn of(metadata: &BTreeMap<String, String>, rows: usize) -> Result<Self> {
+    /// The groups of `expected` rows an index's metadata names, which must hold `rows` rows.
+    pub(crate) fn of(
+        metadata: &BTreeMap<String, String>,
+        rows: usize,
+        expected: usize,
+    ) -> Result<Self> {
         let size = metadata
             .get(GROUP_ROWS_KEY)
             .and_then(|value| value.parse::<usize>().ok())
-            .filter(|size| *size == GROUP_ROWS)
+            .filter(|size| *size == expected)
             .ok_or_else(|| malformed("a grouped table has another group size"))?;
         let lengths = metadata
             .get(GROUP_BYTES_KEY)

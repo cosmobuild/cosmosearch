@@ -11,9 +11,9 @@ use cosmosearch_core::{
 };
 use cosmosearch_format::{
     ChunkGroup, ChunkIndex, ChunkRecord, FileEntry, FileGroup, FileIndex, FileTable, TRAILER_BYTES,
+    TextGroup, TextIndex,
 };
 use cosmosearch_store::IndexHandle;
-use futures_util::{StreamExt, TryStreamExt, stream};
 use tokio::sync::watch;
 
 use crate::Result;
@@ -22,8 +22,8 @@ use crate::coverage::Counts;
 use crate::table_cache::{Part, Table, TableCache, TableKey};
 
 const CHUNKS_PREFIX: &str = "chunks-";
+const TEXT_PREFIX: &str = "text-";
 const TAIL_GUESS: u64 = 64 * 1024;
-const GROUP_CONCURRENCY: usize = 8;
 
 /// Counts the object reads of one call and the bytes they returned.
 #[derive(Debug, Default)]
@@ -113,6 +113,8 @@ struct Cache {
     files: Slots<SegmentId, FileTable>,
     file_groups: Slots<(SegmentId, usize), FileGroup>,
     groups: Slots<(SegmentId, usize), ChunkGroup>,
+    texts: Slots<SegmentId, TextIndex>,
+    text_groups: Slots<(SegmentId, usize), TextGroup>,
 }
 
 /// The values of one kind kept by the reader, and those one call is making for all.
@@ -213,6 +215,7 @@ impl Tables {
     fn retain_only(&self, referenced: &BTreeSet<&SegmentId>) {
         let mut cache = self.cache();
         cache.indexes.ready.retain(|id, _| referenced.contains(id));
+        cache.texts.ready.retain(|id, _| referenced.contains(id));
         cache
             .summaries
             .ready
@@ -231,6 +234,7 @@ impl Tables {
             .ready
             .values()
             .map(|index| index.heap_bytes())
+            .chain(cache.texts.ready.values().map(|texts| texts.heap_bytes()))
             .chain(cache.summaries.ready.values().map(|summary| {
                 summary
                     .index
@@ -402,7 +406,7 @@ impl<'a> Loader<'a> {
         let key = self.tables.key(segment, Part::Files);
         let shared = || match self.tables.shared.get(&key) {
             Some(Table::Files(files)) => Some(files),
-            Some(Table::FileGroup(_) | Table::Group(_)) | None => None,
+            Some(Table::FileGroup(_) | Table::Group(_) | Table::TextGroup(_)) | None => None,
         };
         loop {
             match self
@@ -558,7 +562,7 @@ impl<'a> Loader<'a> {
         let key = self.tables.key(id, Part::FileGroup(group));
         let cached = || match self.tables.shared.get(&key) {
             Some(Table::FileGroup(found)) => Some(found),
-            Some(Table::Files(_) | Table::Group(_)) | None => None,
+            Some(Table::Files(_) | Table::Group(_) | Table::TextGroup(_)) | None => None,
         };
         let slot = (id.clone(), group);
         loop {
@@ -603,7 +607,7 @@ impl<'a> Loader<'a> {
         let key = self.tables.key(id, Part::Group(group));
         let shared = || match self.tables.shared.get(&key) {
             Some(Table::Group(group)) => Some(group),
-            Some(Table::Files(_) | Table::FileGroup(_)) | None => None,
+            Some(Table::Files(_) | Table::FileGroup(_) | Table::TextGroup(_)) | None => None,
         };
         let slot = (id.clone(), group);
         loop {
@@ -663,27 +667,91 @@ impl<'a> Loader<'a> {
         Ok(())
     }
 
-    /// The records in `rows` of `segment`, reading the groups that hold them.
-    pub(crate) async fn records(
+    /// The index of `segment`'s stored text, kept by the reader, or `None` if it has none.
+    pub(crate) async fn text_index(
         &self,
         segment: &SegmentEntry,
-        index: &ChunkIndex,
-        rows: Range<usize>,
-    ) -> Result<Vec<ChunkRecord>> {
-        let (Some(first), Some(last)) = (
-            index.group_of(rows.start),
-            rows.end.checked_sub(1).and_then(|row| index.group_of(row)),
-        ) else {
-            return Ok(Vec::new());
+    ) -> Result<Option<Arc<TextIndex>>> {
+        let Some(file) = text_file(segment) else {
+            return Ok(None);
         };
-        let groups: Vec<Arc<ChunkGroup>> =
-            stream::iter((first..=last).map(|group| self.group(segment, index, group)))
-                .buffered(GROUP_CONCURRENCY)
-                .try_collect()
-                .await?;
-        Ok(rows
-            .filter_map(|row| groups.iter().find_map(|group| group.get(row)).cloned())
-            .collect())
+        let id = segment.id();
+        loop {
+            match self
+                .tables
+                .turn(id, |cache| &mut cache.texts, true, || None)
+            {
+                Turn::Ready(index) => return Ok(Some(index)),
+                Turn::Wait(mut receiver) => {
+                    if let Some(index) = settled(&mut receiver).await {
+                        return Ok(Some(index));
+                    }
+                }
+                Turn::Load(flight) => {
+                    let bytes = self.read_tail(id, file, TextIndex::locate).await?;
+                    let index = TextIndex::decode(bytes)?;
+                    return Ok(Some(flight.finish(Arc::new(index))));
+                }
+            }
+        }
+    }
+
+    /// The text stored for `row` of `segment`, through the table cache, or `None` if the row
+    /// has none.
+    pub(crate) async fn stored_text(
+        &self,
+        segment: &SegmentEntry,
+        texts: &TextIndex,
+        row: usize,
+    ) -> Result<Option<Arc<str>>> {
+        let (true, Some(group)) = (texts.has_text(row), texts.group_of(row)) else {
+            return Ok(None);
+        };
+        let found = self.text_group(segment, texts, group).await?;
+        Ok(found.and_then(|found| found.get(row)))
+    }
+
+    /// Group `group` of `segment`'s stored text, through the table cache, or `None` if the
+    /// segment has no such group.
+    pub(crate) async fn text_group(
+        &self,
+        segment: &SegmentEntry,
+        texts: &TextIndex,
+        group: usize,
+    ) -> Result<Option<Arc<TextGroup>>> {
+        let (Some(file), Some((_, at))) = (text_file(segment), texts.group(group)) else {
+            return Ok(None);
+        };
+        let id = segment.id();
+        let key = self.tables.key(id, Part::TextGroup(group));
+        let cached = || match self.tables.shared.get(&key) {
+            Some(Table::TextGroup(found)) => Some(found),
+            Some(Table::Files(_) | Table::FileGroup(_) | Table::Group(_)) | None => None,
+        };
+        let slot = (id.clone(), group);
+        loop {
+            match self
+                .tables
+                .turn(&slot, |cache| &mut cache.text_groups, false, cached)
+            {
+                Turn::Ready(found) => return Ok(Some(found)),
+                Turn::Wait(mut receiver) => {
+                    if let Some(found) = settled(&mut receiver).await {
+                        return Ok(Some(found));
+                    }
+                }
+                Turn::Load(flight) => {
+                    let bytes = self
+                        .read(id, file, ByteRange::new(at.start, at.end)?)
+                        .await?;
+                    let found = Arc::new(TextGroup::decode(bytes, texts, group)?);
+                    self.tables
+                        .shared
+                        .put(key.clone(), Table::TextGroup(Arc::clone(&found)));
+                    return Ok(Some(flight.finish(found)));
+                }
+            }
+        }
     }
 
     async fn read(
@@ -729,6 +797,14 @@ pub(crate) fn files_segment(shard: &ShardEntry) -> Option<&SegmentEntry> {
         .segments()
         .iter()
         .find(|segment| segment.level() == Level::L0)
+}
+
+/// The file holding a segment's stored text, if it has one.
+fn text_file(segment: &SegmentEntry) -> Option<&SegmentFile> {
+    segment
+        .files()
+        .iter()
+        .find(|file| file.name().as_str().starts_with(TEXT_PREFIX))
 }
 
 /// The file holding a segment's chunk records.

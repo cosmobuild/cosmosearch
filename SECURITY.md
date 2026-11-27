@@ -25,10 +25,14 @@ fails before the parser reads it, and so does a PDF that this check cannot load.
 
 Extraction happens in two places. Indexing extracts every file once. The engine extracts a
 file again whenever it reads text back: `read`, `expand` and `chunks`, snippets that aren't
-in the passage cache, and reranking. If you index files you don't trust, run indexing's
-extract step in a separate process with memory and time limits, and do the same for the
-engine: serve searches from a process you can restart, or turn off snippets and reranking
-and call `read`, `expand` and `chunks` only from such a process.
+in the passage cache, and reranking. In an index created with stored text, PDF, Word, CSV
+and JSON passages are usually read from the index instead. The engine still extracts the
+file when a passage has no stored text, such as one in a segment built without it, and when
+reading the stored text fails; text, Markdown and HTML are always read from the file. If
+you index files you don't trust, run indexing's extract step in a separate process with
+memory and time limits, and do the same for the engine: serve searches from a process you
+can restart, or turn off snippets and reranking and call `read`, `expand` and `chunks` only
+from such a process.
 
 **Panic messages.** A parser that panics fails only its file: cosmosearch catches the panic
 and reports the file as failed, without the panic's message. Rust's panic hook runs first,
@@ -36,6 +40,12 @@ though, and by default prints the message to stderr, where it can quote document
 your files are sensitive, install a panic hook that leaves the message out
 (`std::panic::set_hook`), or keep the stderr of the processes that extract out of your logs.
 cosmosearch does not set a hook, because the hook belongs to the whole process.
+
+**Stored text is document text at rest.** An index created with stored text keeps the text
+of PDF, Word, CSV and JSON chunks in the metadata location. Anyone who can read that
+location can read that text, and deleting a file from the data location does not delete its
+text from the index until the file's removal is indexed and the segments holding it are
+collected. Give read access to the metadata location only to those who may read the files.
 
 **The metadata location is trusted.** cosmosearch writes its index files and reads them back
 as trusted data. Anyone who can write to the metadata location can make a reader decode
