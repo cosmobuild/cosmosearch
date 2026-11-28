@@ -296,7 +296,8 @@ flowchart LR
    display name and rank in each list, plus the search's status, coverage and usage. With
    snippets turned on, the best hits also carry their passage text and the positions of the
    query's words in it, found the way the keyword index reads words, so a stemmed index
-   marks `refunds` for `refund`.
+   marks `refunds` for `refund`. `Snippet::excerpt` cuts a passage down to at most N
+   characters around its densest run of matches.
 
 **Status and coverage.** A search ends `found` if it returned results and `inconclusive` if
 it didn't. Neither is a claim about whether an answer exists. **Coverage** says what the

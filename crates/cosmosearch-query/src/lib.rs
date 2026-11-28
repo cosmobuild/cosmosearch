@@ -54,5 +54,5 @@ pub use reader::{Reader, ReaderOptions};
 pub use request::SearchRequest;
 pub use rerank::{RerankFailure, Reranking};
 pub use search::{SearchHit, SearchResults};
-pub use snippet::Snippet;
+pub use snippet::{Excerpt, Snippet};
 pub use table_cache::{DEFAULT_TABLE_BUDGET, TableCache};
