@@ -6,6 +6,11 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `Snippet::excerpt`: at most N characters of a snippet's passage around its matches, with
+  the excerpt's offset in the passage and its own marks (`Excerpt`).
+
 ## [0.3.0] - 2026-11-27
 
 ### Added
